@@ -45,6 +45,12 @@ public enum Brand {
     }
 
     private static func appendU32(_ data: inout Data, _ value: UInt32) {
-        data.append(contentsOf: withUnsafeBytes(of: value.bigEndian) { $0 })
+        // The bytes must be materialised inside the closure: withUnsafeBytes
+        // only guarantees the pointer for the duration of the closure, and
+        // iterating the pointer afterwards (e.g. `append(contentsOf:)` on a
+        // returned buffer) reads a dead stack slot — correct by accident in
+        // -Onone, stack garbage under -O (the ticket 07 round-trip bug).
+        let bytes = withUnsafeBytes(of: value.bigEndian) { Array($0) }
+        data.append(contentsOf: bytes)
     }
 }
