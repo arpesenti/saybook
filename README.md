@@ -3,12 +3,14 @@
 `saybook` converts a non-DRM EPUB **Book** into a single audiobook-grade **Audiobook** (M4B): one continuous audio track with Chapter Markers and Book metadata (title, artist, album, cover), spoken by Apple's speech engine entirely offline.
 
 ```
-$ saybook book.epub
+$ saybook alice.epub
 Voice: Daniel (enhanced, en-GB) · Rate: 0.5
-✓ 1/12 · CHAPTER I. Down the Rabbit-Hole · 10:52
-✓ 2/12 · CHAPTER II. The Pool of Tears · 10:49
+– 1/14 · wrap0000 · (no text)
+✓ 2/14 · Alice’s Adventures in Wonderland · 1:35
+✓ 3/14 · CHAPTER I. Down the Rabbit-Hole · 10:52
+✓ 4/14 · CHAPTER II. The Pool of Tears · 10:49
 …
-Chapters: 12 · Skipped: 1 (no text) · Duration: 2:04:09 · Size: 35.2 MB · Path: /path/to/book.m4b
+Chapters: 14 · Skipped: 1 (no text) · Duration: 160:56 · Size: 38.4 MB · Path: /path/to/alice.m4b
 ```
 
 ## Requirements
@@ -32,12 +34,12 @@ saybook <book.epub> [-o out.m4b] [--voice V] [--rate 0.0–1.0] [--language LL] 
 
 | Flag | Meaning |
 | --- | --- |
-| `<book.epub>` | The input Book (required). Non-DRM only. |
+| `<book.epub>` | The Book to speak (required). Non-DRM only. |
 | `-o out.m4b` | Write to an explicit path. Default: `<book>.m4b` beside the input. The parent directory must exist. |
 | `--voice V` | Use a specific Voice: a display name or identifier as listed by `say -v ?`. Default: the best installed Voice for the Book's language (premium > enhanced > default). |
 | `--rate 0.0–1.0` | Speech Rate on Apple's scale; `0.5` is normal and the default. |
 | `--language LL` | Pick the Voice for `LL` instead of the Book's declared language (e.g. `--language fr-CA`). |
-| `--keep-scratch` | Keep the working directory after a successful run (per-chapter audio, resume state). |
+| `--keep-scratch` | Keep the Scratch (per-Chapter audio, resume state) after a successful run. |
 | `--force` | Replace an existing output file. Without it, an existing output is refused. |
 
 Progress is reported per Chapter on stderr (`✓ N/M · title · m:ss`, `⏭` for a cached Chapter, `–` for an empty one); the final line summarises chapters, skipped, duration, size and path. Exit codes: `0` success, `1` input/user error (bad EPUB, DRM content, no readable Chapters, no Voice for the language, existing output, interrupted), `2` internal error.
@@ -52,7 +54,7 @@ swift build -c release
 
 ### Resume and re-runs
 
-Per-Chapter audio is cached in a working directory keyed by the Book's path. If a run is interrupted (`Ctrl-C` stops it after the current unit of work, keeping its working directory and reporting progress so far) or fails, **re-running the same command resumes**: finished Chapters are reused, the rest are synthesised. Changing `--voice` or `--rate` clears the cached Chapters for that Book (a different voice/rate must be re-synthesised). `--keep-scratch` preserves the working directory after a successful run.
+Per-Chapter audio is kept in a per-Book **Scratch** directory (keyed by the Book's path) as resume state. If a run is interrupted (`Ctrl-C` stops it after the current unit of work, keeping its Scratch and reporting progress so far) or fails, **re-running the same command resumes**: finished Chapters are reused, the rest are synthesised. Changing `--voice` or `--rate` clears the Book's Scratch (a different voice/rate cannot reuse previous audio). `--keep-scratch` preserves the Scratch after a successful run.
 
 ## The Audiobook
 
@@ -68,7 +70,7 @@ Per-Chapter audio is cached in a working directory keyed by the Book's path. If 
 swift test
 ```
 
-The suite (137 tests, ~30 s, zero network access) covers the pipeline at its seams: EPUB parsing against in-repo mini-EPUB fixtures (single/multi-chapter, EPUB2 and EPUB3, nav, cover, empty documents, links/footnotes/images, missing author, DRM), per-Block extraction rules, Chapter Marker offset math and `chpl`/`ftyp`/`ilst` box round-trips, Voice selection, and end-to-end runs of the real binary (exit codes, resume, SIGINT, flags). It is green in both the debug and the release configuration (`swift test -c release`) — the release run matters because it is the shipping configuration.
+The suite (136 tests, ~30 s, zero network access) covers the pipeline at its seams: EPUB parsing against in-repo mini-EPUB fixtures (single/multi-chapter, EPUB2 and EPUB3, nav, cover, empty documents, links/footnotes/images, missing author, DRM), per-Block extraction rules, Chapter Marker offset math and `chpl`/`ftyp`/`ilst` box round-trips, Voice selection, and end-to-end runs of the real binary (exit codes, resume, SIGINT, flags). It is green in both the debug and the release configuration (`swift test -c release`) — the release run matters because it is the shipping configuration.
 
 ### Manual E2E
 
@@ -84,7 +86,7 @@ Asserted: the M4B brand, a decodable duration (both tools agree), one Chapter Ma
 ## Limitations (v1)
 
 - **Non-DRM Books only** — encrypted content is detected and refused with a clean error.
-- **One Book per run** — the whole Book is one output file; there is no per-Chapter output.
+- **One Book per run** — the whole Book is one Audiobook file; there is no per-Chapter Audiobook.
 - **Fixed ~34 kb/s bitrate** — the `AVAssetExportSession` preset's; not a tunable in v1.
 - **Apple system Voices only** — quality depends on what the machine has installed (English: premium/enhanced voices are best; exotic languages may only have default-quality Voices, or none, in which case the run fails naming the language).
 - **No loudness normalisation** — chapters keep the voice's natural level.

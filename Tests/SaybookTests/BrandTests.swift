@@ -6,38 +6,46 @@ import XCTest
 final class BrandTests: XCTestCase {
 
     /// A minimal M4A: ftyp (major "M4A ", minor 1, compat "mp42" "isom") + an mdat box.
+    /// (`u32Array` is the shared test helper for hand-rolled MP4 bytes,
+    /// defined in ChapterMarkersTests.swift.)
     private func makeM4A() -> Data {
         var ftyp = Data()
-        appendU32(&ftyp, 24) // size: 8 + 4 major + 4 minor + 8 compat
+        ftyp.append(contentsOf: u32Array(24)) // size: 8 + 4 major + 4 minor + 8 compat
         ftyp.append(contentsOf: Array("ftyp".utf8))
         ftyp.append(contentsOf: Array("M4A ".utf8))
-        appendU32(&ftyp, 1) // minor version
+        ftyp.append(contentsOf: u32Array(1)) // minor version
         ftyp.append(contentsOf: Array("mp42".utf8))
         ftyp.append(contentsOf: Array("isom".utf8))
 
         var mdat = Data()
-        appendU32(&mdat, 16) // size: 8 + 8 payload
+        mdat.append(contentsOf: u32Array(16)) // size: 8 + 8 payload
         mdat.append(contentsOf: Array("mdat".utf8))
         mdat.append(contentsOf: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33])
 
         return ftyp + mdat
     }
 
-    private func appendU32(_ data: inout Data, _ value: UInt32) {
-        data.append(contentsOf: withUnsafeBytes(of: value.bigEndian) { Array($0) })
-    }
+    /// The exact 28-byte patched `ftyp` as an independent literal. Deliberately
+    /// not built with a shared byte helper: a helper that shares the code
+    /// under test would hide the same defect it is meant to assert against
+    /// (this is how the dangling-buffer `appendU32` bug from ticket 07
+    /// slipped through — the production patch and the test expectation both
+    /// wrote the same stack garbage, so the byte equality held by accident).
+    /// Minor version 0, byte layout mirrors Apple's own `say -o x.m4b`
+    /// (see prototype probe).
+    private static let expectedPatchedFtyp: [UInt8] = [
+        0x00, 0x00, 0x00, 28, // size
+        0x66, 0x74, 0x79, 0x70, // "ftyp"
+        0x4D, 0x34, 0x42, 0x20, // "M4B "
+        0x6D, 0x34, 0x62, 0x20, // "m4b "
+        0x6D, 0x70, 0x34, 0x32, // "mp42"
+        0x69, 0x73, 0x6F, 0x6D, // "isom"
+        0x00, 0x00, 0x00, 0x00, // minor version
+    ]
 
     func testPatchRewritesMajorAndCompatibleBrands() throws {
         let patched = try Brand.patchFTyp(in: makeM4A())
-
-        // Exact leading 28 bytes: size, "ftyp", major "M4B ", compat "m4b " "mp42" "isom",
-        // minor version 0 (byte layout mirrors Apple's own `say -o x.m4b`, see prototype probe).
-        var expected = Data()
-        appendU32(&expected, 28)
-        expected.append(contentsOf: Array("ftyp".utf8))
-        expected.append(contentsOf: Array("M4B m4b mp42isom".utf8))
-        appendU32(&expected, 0)
-        XCTAssertEqual(Array(patched[..<28]), Array(expected))
+        XCTAssertEqual(Array(patched[0..<28]), Self.expectedPatchedFtyp)
     }
 
     func testPatchPreservesEverythingAfterFtyp() throws {
@@ -58,7 +66,7 @@ final class BrandTests: XCTestCase {
 
     func testPatchRejectsFileWithoutLeadingFtypBox() {
         var garbage = Data()
-        appendU32(&garbage, 16)
+        garbage.append(contentsOf: u32Array(16))
         garbage.append(contentsOf: Array("mdat".utf8))
         garbage.append(contentsOf: [0, 0, 0, 0, 0])
         XCTAssertThrowsError(try Brand.patchFTyp(in: garbage)) { error in
@@ -74,27 +82,6 @@ final class BrandTests: XCTestCase {
 
     // MARK: - Round trip (ticket 07): the patched file still decodes and
     // reports the M4B brand
-
-    /// The exact 28-byte patched `ftyp` as an independent literal. Deliberately
-    /// not built with a shared byte helper: a helper that shares the code
-    /// under test would hide the same defect it is meant to assert against
-    /// (this is how the dangling-buffer `appendU32` bug from ticket 07
-    /// slipped through — the production patch and the test expectation both
-    /// wrote the same stack garbage, so the byte equality held by accident).
-    private static let expectedPatchedFtyp: [UInt8] = [
-        0x00, 0x00, 0x00, 28, // size
-        0x66, 0x74, 0x79, 0x70, // "ftyp"
-        0x4D, 0x34, 0x42, 0x20, // "M4B "
-        0x6D, 0x34, 0x62, 0x20, // "m4b "
-        0x6D, 0x70, 0x34, 0x32, // "mp42"
-        0x69, 0x73, 0x6F, 0x6D, // "isom"
-        0x00, 0x00, 0x00, 0x00, // minor version
-    ]
-
-    func testPatchedFtypLeadingBytesMatchTheIndependentLiteral() throws {
-        let patched = try Brand.patchFTyp(in: makeM4A())
-        XCTAssertEqual(Array(patched[0..<28]), Self.expectedPatchedFtyp)
-    }
 
     /// The round trip the ticket names: a real export-preset M4A, patched,
     /// written to disk — still decodes as audio (AVFoundation reads its full

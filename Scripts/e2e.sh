@@ -63,27 +63,39 @@ set +e
 "$BIN" "$EPUB" -o "$OUT" 2> "$LOG"
 RUN_EXIT=$?
 set -e
-[ "$RUN_EXIT" -eq 0 ] || { fail "saybook exited $RUN_EXIT (expected 0):"; cat "$LOG"; }
+if [ "$RUN_EXIT" -ne 0 ]; then
+  echo "FAIL: saybook exited $RUN_EXIT (expected 0)" >&2
+  cat "$LOG" >&2
+  exit 1
+fi
 [ -f "$OUT" ] || fail "no output file at $OUT"
 ok "run exited 0, output exists"
 
 # --- expectations from the Book itself ---------------------------------------
-OPF_PATH="$(unzip -p "$EPUB" META-INF/container.xml | sed -n 's:.*full-path="\([^"]*\)".*:\1:p' | head -1)"
+OPF_PATH="$(unzip -p "$EPUB" META-INF/container.xml | sed -n 's:.*full-path="\([^"]*\)".*:\1:p' | head -1 || true)"
 [ -n "$OPF_PATH" ] || fail "cannot resolve the OPF path from META-INF/container.xml"
-OPF="$(unzip -p "$EPUB" "$OPF_PATH")"
+OPF="$(unzip -p "$EPUB" "$OPF_PATH" || true)"
+# The leading `.*` consumes the line's indentation (sed's s// only replaces
+# the matched span); last-occurrence-on-a-line semantics are fine — real OPFs
+# put one element per line.
 want_title="$(printf '%s' "$OPF" | sed -n 's|.*<dc:title[^>]*>[[:space:]]*\([^<]*\)[[:space:]]*</dc:title>.*|\1|p' | head -1)"
 want_author="$(printf '%s' "$OPF" | sed -n 's|.*<dc:creator[^>]*>[[:space:]]*\([^<]*\)[[:space:]]*</dc:creator>.*|\1|p' | head -1)"
 [ -n "$want_author" ] || want_author="Unknown"
 
-summary="$(grep -E '^Chapters: ' "$LOG" | tail -1)"
-[ -n "$summary" ] || fail "no summary line in saybook's stderr:"; cat "$LOG"
+summary="$(grep -E '^Chapters: ' "$LOG" | tail -1 || true)"
+if [ -z "$summary" ]; then
+  echo "FAIL: no summary line in saybook's stderr" >&2
+  cat "$LOG" >&2
+  exit 1
+fi
 chapters="$(printf '%s' "$summary" | sed -n 's|.*Chapters: \([0-9]*\) ·.*|\1|p')"
 skipped="$(printf '%s' "$summary" | sed -n 's|.*Skipped: \([0-9]*\).*|\1|p')"
+[ -n "$chapters" ] && [ -n "$skipped" ] || fail "cannot parse the summary line: $summary"
 want_markers=$((chapters - skipped))
 [ "$want_markers" -ge 1 ] || fail "Book has $chapters chapters, $skipped skipped — nothing to assert"
 
 # --- brand -------------------------------------------------------------------
-afinfo_out="$(afinfo "$OUT")"
+afinfo_out="$(afinfo "$OUT" || true)"
 printf '%s' "$afinfo_out" | grep -q "File type ID: *m4bf" \
   || fail "afinfo does not report the M4B file type (m4bf):"
 ok "brand: afinfo reports m4bf"
@@ -98,14 +110,14 @@ awk -v d="$af_duration" 'BEGIN { exit d > 1.0 ? 0 : 1 }' \
   || fail "duration $af_duration s is implausibly short"
 ok "duration: afinfo decodes $af_duration s of audio"
 
-pb_duration="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 "$OUT" | sed -n 's:^duration=::p')"
+pb_duration="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 "$OUT" 2>/dev/null | sed -n 's:^duration=::p' || true)"
 [ -n "$pb_duration" ] || fail "ffprobe reports no duration"
 awk -v a="$af_duration" -v p="$pb_duration" 'BEGIN { d = a - p; if (d < 0) d = -d; exit d <= 2.0 ? 0 : 1 }' \
   || fail "duration mismatch: afinfo $af_duration s vs ffprobe $pb_duration s"
 ok "duration: ffprobe agrees ($pb_duration s)"
 
 # --- chapter markers -----------------------------------------------------------
-chapters_out="$(ffprobe -v error -show_chapters -of default=noprint_wrappers=1 "$OUT")"
+chapters_out="$(ffprobe -v error -show_chapters -of default=noprint_wrappers=1 "$OUT" 2>/dev/null || true)"
 got_markers="$(printf '%s' "$chapters_out" | grep -c '^id=' || true)"
 [ "$got_markers" -eq "$want_markers" ] \
   || fail "ffprobe reads $got_markers chapters, expected $want_markers (Chapters $chapters − Skipped $skipped)"
@@ -116,14 +128,14 @@ first_start="$(printf '%s\n' "$chapters_out" | awk '/^id=[0-9]+$/ {f=1; next} f 
 [ "$first_start" = "0.000000" ] || fail "first chapter does not start at 0:00 (got $first_start)"
 ok "markers: first chapter starts at 0:00"
 
-untitled="$(printf '%s\n' "$chapters_out" | awk -v n="$got_markers" '
-  /^TAG:title=$/{ t = substr($0, 11); gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); if (t == "") u++ }
-  END { print u + 0 }')"
-[ "$untitled" -eq 0 ] || fail "$untitled of $got_markers chapters have no title"
+titled="$(printf '%s\n' "$chapters_out" | awk '
+  /^TAG:title=/{ t = substr($0, 11); gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); if (t != "") n++ }
+  END { print n + 0 }')"
+[ "$titled" -eq "$got_markers" ] || fail "$((got_markers - titled)) of $got_markers chapters have no title"
 ok "markers: every chapter carries a title"
 
 # --- metadata --------------------------------------------------------------------
-tags_out="$(ffprobe -v error -show_entries format_tags=title,artist -of default=noprint_wrappers=1 "$OUT")"
+tags_out="$(ffprobe -v error -show_entries format_tags=title,artist -of default=noprint_wrappers=1 "$OUT" 2>/dev/null || true)"
 got_title="$(printf '%s\n' "$tags_out" | sed -n 's|^TAG:title=||p')"
 got_author="$(printf '%s\n' "$tags_out" | sed -n 's|^TAG:artist=||p')"
 if [ -n "$want_title" ]; then
