@@ -362,8 +362,222 @@ final class CLITests: XCTestCase {
             XCTAssertEqual(markers?[n - 1].sampleOffset, cumulative, "cached chapter \(n) offset")
             cumulative += frameCount
         }
+
         let file = try AVAudioFile(forReading: expected)
         let duration = Double(file.length) / Synthesis.sampleRate
         XCTAssertEqual(duration, 139, accuracy: 14, "duration: \(duration)")
     }
+
+    // MARK: - Ticket 04: voice & language selection
+
+    /// The progress header's fields:
+    /// `Voice: <name> (<quality>, <language>) · Rate: <rate>`.
+    private func voiceLineFields(from stderr: String) -> (name: String, language: String, rate: String)? {
+        guard let line = stderr.split(separator: "\n").map(String.init).first(where: { $0.hasPrefix("Voice:") }) else {
+            return nil
+        }
+        let rest = String(line.dropFirst("Voice: ".count))
+        guard let sep = rest.firstRange(of: " · Rate: ") else { return nil }
+        let head = String(rest[..<sep.lowerBound])
+        let rate = String(rest[sep.upperBound...])
+        guard let open = head.lastIndex(of: "(") else { return nil }
+        let name = head[..<open].trimmingCharacters(in: .whitespaces)
+        var inner = String(head[head.index(after: open)...])
+        if inner.hasSuffix(")") { inner.removeLast() }
+        let parts = inner.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 2 else { return nil }
+        return (name, parts[1], rate)
+    }
+
+    private func duration(of url: URL) throws -> TimeInterval {
+        let file = try AVAudioFile(forReading: url)
+        return Double(file.length) / Synthesis.sampleRate
+    }
+
+    /// No flags: the best installed voice for the Book's OPF language ("en"
+    /// for the fixture) is used and named in the progress output, with the
+    /// default rate.
+    func testDefaultRunReportsSelectedVoiceAndRate() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let fields = try XCTUnwrap(voiceLineFields(from: result.stderr), "stderr: \(result.stderr)")
+        XCTAssertFalse(fields.name.isEmpty)
+        XCTAssertTrue(fields.language.lowercased().hasPrefix("en"), "Book language is en: \(fields)")
+        XCTAssertEqual(fields.rate, "0.5")
+        // The reported voice is an installed voice (cross-checked against
+        // the catalog; the selection itself is unit-tested).
+        let installed = VoiceCatalog.installed()
+        XCTAssertTrue(installed.contains { $0.name == fields.name }, "reported voice \(fields.name) not installed")
+    }
+
+    /// `--voice` accepts a display name and an identifier as listed by
+    /// `say -v ?`; the chosen voice is the one used and reported.
+    func testExplicitVoiceByDisplayNameAndIdentifier() throws {
+        // An en-US voice with a unique display name: `--voice <name>` must
+        // then unambiguously resolve to this entry.
+        let installed = VoiceCatalog.installed()
+        var nameCounts: [String: Int] = [:]
+        for voice in installed { nameCounts[voice.name, default: 0] += 1 }
+        let candidate = try XCTUnwrap(
+            installed.first { $0.language == "en-US" && nameCounts[$0.name] == 1 },
+            "no uniquely-named en-US voice installed"
+        )
+
+        for reference in [candidate.name, candidate.identifier] {
+            let dir = try makeTempDir()
+            let input = dir.appendingPathComponent("book.epub")
+            try FileManager.default.copyItem(
+                at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+            )
+
+            let result = try run([input.path, "--voice", reference])
+
+            XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+            let fields = try XCTUnwrap(voiceLineFields(from: result.stderr), "stderr: \(result.stderr)")
+            XCTAssertEqual(fields.name, candidate.name)
+            XCTAssertEqual(fields.language, candidate.language)
+        }
+    }
+
+    /// An unknown voice name fails with exit 1 and names the voice.
+    func testUnknownVoiceFailsWithUserError() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+
+        let result = try run([input.path, "--voice", "NotARealVoice"])
+
+        XCTAssertEqual(result.exit, 1)
+        XCTAssertTrue(result.stderr.contains("NotARealVoice"), "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.lowercased().contains("voice"), "stderr: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("book.m4b").path))
+    }
+
+    /// `--rate` outside 0.0–1.0 (or not a number) fails with exit 1 and
+    /// names the offending value.
+    func testInvalidRateFailsWithUserError() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        for value in ["1.5", "-0.1", "abc"] {
+            let result = try run([input.path, "--rate", value])
+            XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+            XCTAssertTrue(result.stderr.lowercased().contains("rate"), "stderr: \(result.stderr)")
+            XCTAssertTrue(result.stderr.contains(value), "offending value not named: \(result.stderr)")
+        }
+    }
+
+    /// `--language` with no installed Voice fails with exit 1 and names the
+    /// language.
+    func testLanguageWithoutInstalledVoiceFailsNamingTheLanguage() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+
+        let result = try run([input.path, "--language", "xx-XX"])
+
+        XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("xx-XX"), "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.lowercased().contains("voice"), "stderr: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("book.m4b").path))
+    }
+
+    /// `--language` overrides the Book's language for voice selection.
+    func testLanguageOverrideSelectsVoiceForThatLanguage() throws {
+        guard VoiceCatalog.installed().contains(where: { $0.language.lowercased().hasPrefix("fr") })
+        else { throw XCTSkip("no French voice installed") }
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+
+        let result = try run([input.path, "--language", "fr"])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let fields = try XCTUnwrap(voiceLineFields(from: result.stderr), "stderr: \(result.stderr)")
+        XCTAssertTrue(fields.language.lowercased().hasPrefix("fr"), "stderr: \(result.stderr)")
+    }
+
+    /// The Rate reaches the utterance: a faster rate yields clearly shorter
+    /// audio than a slower one on the same fixture.
+    func testRateChangesDuration() throws {
+        let dir = try makeTempDir()
+        for (name, rate) in [("rate-fast.epub", "0.8"), ("rate-slow.epub", "0.3")] {
+            let input = dir.appendingPathComponent(name)
+            try FileManager.default.copyItem(
+                at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+            )
+            let result = try run([input.path, "--rate", rate])
+            XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        }
+
+        let fast = try duration(of: dir.appendingPathComponent("rate-fast.m4b"))
+        let slow = try duration(of: dir.appendingPathComponent("rate-slow.m4b"))
+        XCTAssertGreaterThan(slow, fast, "rate 0.3 (\(slow) s) must be slower than rate 0.8 (\(fast) s)")
+        XCTAssertGreaterThan(slow - fast, 1.0, "rates passed through unchanged must differ audibly")
+    }
+
+    /// A different voice renders different audio: the flag reaches the
+    /// engine, not just the progress line. (Objective stand-in for the
+    /// ticket's audible-difference manual check.)
+    func testExplicitVoiceChangesTheAudio() throws {
+        guard let distinct = VoiceCatalog.installed().first(where: { $0.name == "Zarvox" })
+        else { throw XCTSkip("Zarvox not installed") }
+        let dir = try makeTempDir()
+        for (name, extra) in [("voice-a.epub", [String]()), ("voice-b.epub", ["--voice", distinct.name])] {
+            let input = dir.appendingPathComponent(name)
+            try FileManager.default.copyItem(
+                at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+            )
+            let result = try run([input.path] + extra)
+            XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        }
+
+        let rawA = dir.appendingPathComponent("a.f32")
+        let rawB = dir.appendingPathComponent("b.f32")
+        try decodeToFloatPCM(dir.appendingPathComponent("voice-a.m4b"), at: rawA)
+        try decodeToFloatPCM(dir.appendingPathComponent("voice-b.m4b"), at: rawB)
+        let a = try Data(contentsOf: rawA)
+        let b = try Data(contentsOf: rawB)
+        XCTAssertGreaterThan(a.count, 22_050 * 3)
+        XCTAssertGreaterThan(b.count, 22_050 * 3)
+        let n = min(a.count, b.count) / 4
+        var maxDiff: Float = 0
+        for i in 0..<n {
+            let sa = a.withUnsafeBytes { $0.load(fromByteOffset: i * 4, as: Float.self) }
+            let sb = b.withUnsafeBytes { $0.load(fromByteOffset: i * 4, as: Float.self) }
+            maxDiff = max(maxDiff, abs(sa - sb))
+        }
+        XCTAssertGreaterThan(maxDiff, 0.1, "different voices must render different audio")
+    }
+
+    /// An option outside v1's flag set fails with exit 1 and the usage.
+    func testUnknownOptionShowsUsage() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+
+        let result = try run([input.path, "--force"])
+
+        XCTAssertEqual(result.exit, 1)
+        XCTAssertTrue(result.stderr.contains("--force"), "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("Usage"), "stderr: \(result.stderr)")
+    }
 }
+

@@ -10,11 +10,17 @@ public struct SaybookError: Error {
 /// 0 ok · 1 input/user error · 2 internal error.
 @MainActor
 public func saybookMain(_ arguments: [String]) -> Int32 {
-    guard arguments.count == 1 else {
-        report("Usage: saybook <book.epub>")
+    let options: CLIOptions
+    do {
+        options = try CLIOptions.parse(arguments)
+    } catch let error as CLIOptionsError {
+        reportOptionsError(error)
         return 1
+    } catch {
+        report("error: \(error)")
+        return 2
     }
-    let input = URL(fileURLWithPath: arguments[0])
+    let input = URL(fileURLWithPath: options.inputPath)
     var isDirectory: ObjCBool = false
     guard FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectory),
           !isDirectory.boolValue
@@ -29,6 +35,17 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
         return 1
     }
 
+    // An explicit `--voice` must exist before any work starts: a fast
+    // failure with no Scratch side effects.
+    var explicitVoice: Voice?
+    if let reference = options.voice {
+        guard let chosen = VoiceSelection.named(reference, in: VoiceCatalog.installed()) else {
+            report("error: Unknown voice: \(reference) (see `say -v ?` for installed voices)")
+            return 1
+        }
+        explicitVoice = chosen
+    }
+
     var scratch: URL?
     do {
         let scratchDir = try Scratch.directory(for: input)
@@ -36,7 +53,22 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
 
         let book = try Epub.load(bookAt: input, scratch: scratchDir)
 
-        let (renders, skipped) = try synthesizeChapters(of: book, in: scratchDir)
+        // The voice for the run: `--voice` when given (resolved above, before
+        // any work starts), else the best installed voice for the language
+        // `--language` overrides the Book's OPF language for.
+        let voice: Voice
+        if let explicitVoice {
+            voice = explicitVoice
+        } else {
+            let language = options.language ?? book.language
+            guard let chosen = VoiceSelection.best(forLanguage: language, in: VoiceCatalog.installed()) else {
+                throw SaybookError(message: "No installed voice for language \"\(language)\"")
+            }
+            voice = chosen
+        }
+        report("Voice: \(voice.name) (\(voice.quality.label), \(voice.language)) · Rate: \(formatRate(options.rate))")
+
+        let (renders, skipped) = try synthesizeChapters(of: book, voice: voice, rate: options.rate, in: scratchDir)
 
         let combined = scratchDir.appendingPathComponent("book.caf")
         try Assemble.concatenate(renders.map(\.cafURL), to: combined)
@@ -101,7 +133,10 @@ private struct ChapterRender {
 /// reports one progress line per Chapter on stderr. A Chapter whose CAF
 /// already exists in Scratch is skipped (resume: existence = state).
 @MainActor
-private func synthesizeChapters(of book: Book, in scratch: URL) throws -> (renders: [ChapterRender], skipped: Int) {
+private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in scratch: URL) throws -> (renders: [ChapterRender], skipped: Int) {
+    guard let speechVoice = VoiceCatalog.speechVoice(for: voice) else {
+        throw SaybookError(message: "Voice \"\(voice.name)\" is no longer installed")
+    }
     try FileManager.default.createDirectory(
         at: Scratch.chaptersDirectory(in: scratch), withIntermediateDirectories: true
     )
@@ -125,7 +160,8 @@ private func synthesizeChapters(of book: Book, in scratch: URL) throws -> (rende
             report("⏭ \(number)/\(book.chapters.count) · \(chapter.title) · \(formatDuration(Double(frameCount) / Synthesis.sampleRate)) (cached)")
         } else {
             let utterance = AVSpeechUtterance(string: chapter.text)
-            utterance.voice = AVSpeechSynthesisVoice(language: book.language) ?? AVSpeechSynthesisVoice()
+            utterance.voice = speechVoice
+            utterance.rate = Float(rate)
             try Synthesis.render(utterance: utterance, to: cafURL)
             frameCount = try cafFrameCount(at: cafURL)
             report("✓ \(number)/\(book.chapters.count) · \(chapter.title) · \(formatDuration(Double(frameCount) / Synthesis.sampleRate))")
@@ -167,6 +203,33 @@ private func formatSize(_ bytes: Int) -> String {
     let mib = kib / 1024
     if mib < 1024 { return String(format: "%.1f MB", mib) }
     return String(format: "%.1f GB", mib / 1024)
+}
+
+/// The v1 flag set; `--force`, `--keep-scratch` and `-o` arrive in
+/// ticket 06 and friends.
+private let usageLine = "Usage: saybook <book.epub> [--voice NAME] [--rate 0.0–1.0] [--language LL]"
+
+/// Readable messages for command-line user errors (exit 1).
+private func reportOptionsError(_ error: CLIOptionsError) {
+    switch error {
+    case .usage:
+        report(usageLine)
+    case let .unknownOption(option):
+        report("error: Unknown option: \(option)")
+        report(usageLine)
+    case let .missingValue(for: flag):
+        report("error: --\(flag) requires a value")
+        report(usageLine)
+    case let .invalidRate(value):
+        report("error: Rate must be a number between 0.0 and 1.0: \(value)")
+    case let .outOfRangeRate(value):
+        report("error: Rate must be between 0.0 and 1.0: \(value)")
+    }
+}
+
+/// The Rate for the progress line, minimal ("0.5", "1", "0.33").
+private func formatRate(_ rate: Double) -> String {
+    String(format: "%g", rate)
 }
 
 private func report(_ line: String) {
