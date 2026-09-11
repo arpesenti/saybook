@@ -69,14 +69,17 @@ public enum VoiceSelection {
 
     public static func named(_ reference: String, in voices: [Voice]) -> Voice? {
         guard !reference.isEmpty else { return nil }
-        for voice in voices where voice.identifier == reference || voice.name == reference {
-            return voice
-        }
         let lower = reference.lowercased()
-        for voice in voices where voice.identifier.lowercased() == lower || voice.name.lowercased() == lower {
-            return voice
+        var caseInsensitive: Voice?
+        for voice in voices {
+            // Exact beats case-insensitive, wherever it sits in the catalog.
+            if voice.identifier == reference || voice.name == reference { return voice }
+            if caseInsensitive == nil,
+               voice.identifier.lowercased() == lower || voice.name.lowercased() == lower {
+                caseInsensitive = voice
+            }
         }
-        return nil
+        return caseInsensitive
     }
 
     /// The highest-quality voice of `candidates`, the first one in catalog
@@ -92,6 +95,8 @@ public enum VoiceSelection {
 
 /// The installed-voice catalog: the adapter between the engine's
 /// `AVSpeechSynthesisVoice` list and the `Voice` value type selection runs on.
+/// The engine is re-enumerated on every call, so two calls in one run can
+/// differ if a voice is installed or uninstalled in between.
 public enum VoiceCatalog {
 
     /// Every installed voice, in engine order.
@@ -106,9 +111,9 @@ public enum VoiceCatalog {
         }
     }
 
-    /// The engine voice a catalog entry resolves to. The catalog is
-    /// snapshotted per run, so this only fails if a voice is uninstalled
-    /// mid-run.
+    /// The engine voice a catalog entry resolves to. The CLI resolves the
+    /// entry and its engine voice from calls a moment apart, so this only
+    /// fails if a voice is uninstalled mid-run.
     public static func speechVoice(for voice: Voice) -> AVSpeechSynthesisVoice? {
         AVSpeechSynthesisVoice.speechVoices().first { $0.identifier == voice.identifier }
     }

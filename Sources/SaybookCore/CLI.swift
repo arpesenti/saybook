@@ -66,6 +66,12 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
             }
             voice = chosen
         }
+
+        // Cached Chapter CAFs are resume state only for the same options:
+        // a different Voice or Rate clears them (ticket 04).
+        if try Scratch.ensureOptions(Scratch.optionsMarker(voice: voice, rate: options.rate), in: scratchDir) {
+            report("note: voice or rate changed — clearing cached chapters")
+        }
         report("Voice: \(voice.name) (\(voice.quality.label), \(voice.language)) · Rate: \(formatRate(options.rate))")
 
         let (renders, skipped) = try synthesizeChapters(of: book, voice: voice, rate: options.rate, in: scratchDir)

@@ -173,8 +173,16 @@ final class CLITests: XCTestCase {
         let expected = dir.appendingPathComponent("book.m4b")
 
         // Seed Scratch with finished Chapter CAFs of known PCM lengths:
-        // 22 050 (1 s tone), 11 025 (0.5 s silence), 33 075 (1.5 s tone).
+        // 22 050 (1 s tone), 11 025 (0.5 s silence), 33 075 (1.5 s tone) —
+        // plus the options marker a prior run with the default options
+        // (best installed voice for the Book's "en" language, rate 0.5)
+        // would have written.
         let scratch = try Scratch.directory(for: input)
+        let defaultVoice = try XCTUnwrap(
+            VoiceSelection.best(forLanguage: "en", in: VoiceCatalog.installed()),
+            "no English voice installed"
+        )
+        try Scratch.ensureOptions(Scratch.optionsMarker(voice: defaultVoice, rate: CLIOptions.defaultRate), in: scratch)
         let frames = [22_050, 11_025, 33_075]
         let cafs = (1...3).map { Scratch.chapterCAFURL(in: scratch, index: $0) }
         for (i, caf) in cafs.enumerated() {
@@ -563,6 +571,41 @@ final class CLITests: XCTestCase {
             maxDiff = max(maxDiff, abs(sa - sb))
         }
         XCTAssertGreaterThan(maxDiff, 0.1, "different voices must render different audio")
+    }
+
+    /// A `--rate` change after a run left cached Chapters: the options
+    /// marker mismatch clears the cache (reported), and the Chapter is
+    /// re-synthesised instead of replaying the old audio.
+    func testChangedRateClearsCachedChapters() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        // A cached chapter from a default-options run (best "en" voice,
+        // rate 0.5): a 1 s tone standing in for the Chapter's speech.
+        let scratch = try Scratch.directory(for: input)
+        let defaultVoice = try XCTUnwrap(
+            VoiceSelection.best(forLanguage: "en", in: VoiceCatalog.installed()),
+            "no English voice installed"
+        )
+        try Scratch.ensureOptions(Scratch.optionsMarker(voice: defaultVoice, rate: CLIOptions.defaultRate), in: scratch)
+        let caf = Scratch.chapterCAFURL(in: scratch, index: 1)
+        try FileManager.default.createDirectory(at: caf.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try writeCAF(frames: 22_050, at: caf) { _ in 0.5 }
+
+        let result = try run([input.path, "--rate", "0.9"])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let lines = result.stderr.split(separator: "\n").map(String.init)
+        XCTAssertTrue(lines.contains { $0.hasPrefix("note:") && $0.contains("clearing cached chapters") }, "stderr: \(result.stderr)")
+        XCTAssertTrue(lines.contains { $0.hasPrefix("✓ 1/1") }, "Chapter must be re-synthesised: \(result.stderr)")
+        XCTAssertFalse(lines.contains { $0.hasPrefix("⏭") }, "stale CAF replayed: \(result.stderr)")
+        // The output is speech (≈ 2 s at rate 0.9 — the rate scale is
+        // non-linear), not the 1 s tone.
+        let duration = try duration(of: dir.appendingPathComponent("book.m4b"))
+        XCTAssertGreaterThan(duration, 1.2, "replayed the cached tone: \(duration)")
+        XCTAssertLessThan(duration, 15, "\(duration)")
     }
 
     /// An option outside v1's flag set fails with exit 1 and the usage.

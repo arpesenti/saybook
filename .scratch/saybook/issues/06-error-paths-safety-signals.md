@@ -14,3 +14,7 @@
 - [ ] Non-XHTML Spine items (video, images, other media) are skipped without failing the run
 - [ ] SIGINT stops the run after the current unit of work, keeps Scratch, prints progress so far, and exits cleanly (resume by re-running)
 - [ ] Each failure mode is covered by a test that asserts the exit code and the message (no synthesis needed — exercise via fixtures and stubs)
+
+## Comments
+
+- 2026-09-11 (agent, from #04 review): The spec's CLI line also names `-o out.m4b` and `--keep-scratch` ("`saybook <book.epub> [-o out.m4b] … [--keep-scratch] [--force]`"), and no ticket owns them yet — #04's flag parser rejects both as unknown options until then. #06 is the natural home (both are run-safety/CLI-surface concerns); note them here so they are not dropped when #07 writes the README flag documentation.
