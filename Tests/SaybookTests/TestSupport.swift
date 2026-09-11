@@ -1,7 +1,10 @@
+import AVFoundation
 import Foundation
 import XCTest
+@testable import SaybookCore
 
-/// Test helpers: locate the package root and manage temp directories.
+/// Test helpers: locate the package root, manage temp directories, and write
+/// PCM CAFs with known frame counts.
 extension XCTestCase {
 
     /// Walks up from this source file to the directory containing Package.swift.
@@ -36,4 +39,45 @@ extension XCTestCase {
         task.waitUntilExit()
         XCTAssertEqual(task.terminationStatus, 0, "zip failed: \(archive.path)")
     }
+}
+
+/// Writes a mono 22.05 kHz Float32 CAF (the Synthesis output format) with
+/// `frames` frames, filling sample `i` with `sample(i)`.
+func writeCAF(frames: Int, at url: URL, sample: (Int) -> Float) throws {
+    let file = try AVAudioFile(forWriting: url, settings: Synthesis.cafSettings)
+    let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(frames))!
+    buffer.frameLength = AVAudioFrameCount(frames)
+    let channel = buffer.floatChannelData![0]
+    for i in 0..<frames { channel[i] = sample(i) }
+    try file.write(from: buffer)
+}
+
+/// The frame count of a CAF file.
+func cafFrameCount(at url: URL) throws -> Int {
+    let file = try AVAudioFile(forReading: url)
+    return Int(file.length)
+}
+
+/// Decodes an M4B/M4A to raw Float32 little-endian mono PCM via ffmpeg.
+func decodeToFloatPCM(_ input: URL, at output: URL) throws {
+    guard let ffmpeg = which("ffmpeg") else { throw XCTSkip("ffmpeg not available") }
+    let (exit, _, stderr) = try runTool(
+        ffmpeg, ["-y", "-v", "error", "-i", input.path, "-f", "f32le", "-acodec", "pcm_f32le", output.path]
+    )
+    XCTAssertEqual(exit, 0, "ffmpeg decode failed: \(stderr)")
+}
+
+/// Root-mean-square amplitude of `count` samples starting at `sample`
+/// in a Float32 little-endian PCM file.
+func rms(of data: Data, from sample: Int, count: Int) -> Float {
+    let n = min(count, max(data.count / 4 - sample, 0))
+    guard n > 0 else { return 0 }
+    var sum: Float = 0
+    for i in sample..<(sample + n) {
+        let v = data.withUnsafeBytes { buf in
+            buf.load(fromByteOffset: i * 4, as: Float.self)
+        }
+        sum += v * v
+    }
+    return (sum / Float(n)).squareRoot()
 }

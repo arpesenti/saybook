@@ -15,11 +15,31 @@ final class EpubTests: XCTestCase {
         XCTAssertEqual(book.author, "Test Author")
         XCTAssertEqual(book.language, "en")
         XCTAssertEqual(book.chapters.count, 1)
-        XCTAssertEqual(book.chapters[0].title, "ch1")
+        // Title falls back to the document's largest heading (ticket 02).
+        XCTAssertEqual(book.chapters[0].title, "Chapter One")
         XCTAssertEqual(
             book.chapters[0].text,
             "Chapter One Chapter One The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs."
         )
+    }
+
+    func testLoadThreeChapterFixtureTitles() throws {
+        let scratch = try makeTempDir()
+        let book = try Epub.load(
+            bookAt: fixturesDir.appendingPathComponent("three-chapter.epub"),
+            scratch: scratch
+        )
+
+        XCTAssertEqual(book.title, "Three Chapter Book")
+        XCTAssertEqual(book.chapters.count, 3)
+        // Title fallback: largest heading → largest heading → filename.
+        XCTAssertEqual(book.chapters.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
+        XCTAssertTrue(book.chapters.allSatisfy { !$0.text.isEmpty })
+        // ch1 is deliberately short (resume/kill tests kill it mid-ch2/ch3);
+        // ch2 and ch3 are long so the kill window is wide.
+        XCTAssertGreaterThan(book.chapters[1].text.split(separator: " ").count, 150)
+        XCTAssertGreaterThan(book.chapters[2].text.split(separator: " ").count, 100)
+        XCTAssertLessThan(book.chapters[0].text.split(separator: " ").count, 30)
     }
 
     func testLoadRejectsFileThatIsNotAZip() throws {

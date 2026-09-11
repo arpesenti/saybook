@@ -6,11 +6,15 @@ import Foundation
 /// delivers buffer and delegate callbacks on the main queue.
 public enum Synthesis {
 
+    /// The engine's native output sample rate; the timescale of every CAF
+    /// this package writes and of the concatenated Audiobook track.
+    public static let sampleRate: Double = 22_050
+
     /// The engine's native output format: 22.05 kHz mono Float32 PCM.
     /// Never mutated after creation, hence the explicit non-Sendable escape hatch.
     nonisolated(unsafe) public static let cafSettings: [String: Any] = [
         AVFormatIDKey: kAudioFormatLinearPCM,
-        AVSampleRateKey: 22050.0,
+        AVSampleRateKey: sampleRate,
         AVNumberOfChannelsKey: 1,
         AVLinearPCMBitDepthKey: 32,
         AVLinearPCMIsFloatKey: true,
@@ -27,29 +31,45 @@ public enum Synthesis {
     /// Must run on the main thread: callbacks arrive on the main queue, so
     /// the main runloop is pumped until `didFinish` fires (which happens
     /// *after* the last buffer — see the prototype probe).
+    ///
+    /// The CAF is published atomically (rendered to a `.partial` sibling,
+    /// renamed on success): a killed run never leaves a partial file at the
+    /// final name, which is what resume keys on.
     @MainActor
     public static func render(utterance: AVSpeechUtterance, to cafURL: URL) throws {
+        let partial = cafURL.deletingPathExtension().appendingPathExtension("caf.partial")
+        try? FileManager.default.removeItem(at: partial)
         let collector = UtteranceCollector()
-        let file = try AVAudioFile(forWriting: cafURL, settings: cafSettings)
+        do {
+            // The AVAudioFile is released (closing the underlying file) at
+            // the end of this scope, before the atomic rename.
+            let file = try AVAudioFile(forWriting: partial, settings: cafSettings)
 
-        let synthesizer = AVSpeechSynthesizer()
-        synthesizer.delegate = collector
-        synthesizer.write(utterance) { buffer in
-            guard let pcm = buffer as? AVAudioPCMBuffer else { return }
-            do {
-                // Write the engine's buffer directly: a freshly allocated
-                // buffer has frameLength 0 and would store zero bytes.
-                try file.write(from: pcm)
-            } catch {
-                collector.fail(error)
+            let synthesizer = AVSpeechSynthesizer()
+            synthesizer.delegate = collector
+            synthesizer.write(utterance) { buffer in
+                guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+                do {
+                    // Write the engine's buffer directly: a freshly allocated
+                    // buffer has frameLength 0 and would store zero bytes.
+                    try file.write(from: pcm)
+                } catch {
+                    collector.fail(error)
+                }
+            }
+
+            while collector.state == .running {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
             }
         }
-
-        while collector.state == .running {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
-        }
         if let error = collector.error {
-            try? FileManager.default.removeItem(at: cafURL)
+            try? FileManager.default.removeItem(at: partial)
+            throw SynthesisError.failed("\(error)")
+        }
+        do {
+            try FileManager.default.moveItem(at: partial, to: cafURL)
+        } catch {
+            try? FileManager.default.removeItem(at: partial)
             throw SynthesisError.failed("\(error)")
         }
     }

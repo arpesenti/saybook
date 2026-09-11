@@ -29,23 +29,40 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
         return 1
     }
 
-    let scratch = URL.temporaryDirectory.appendingPathComponent("saybook-\(UUID().uuidString)")
+    var scratch: URL?
     do {
-        let book = try Epub.load(bookAt: input, scratch: scratch)
+        let scratchDir = try Scratch.directory(for: input)
+        scratch = scratchDir
 
-        let cafURLs = try synthesizeChapters(of: book, in: scratch)
+        let book = try Epub.load(bookAt: input, scratch: scratchDir)
 
-        let combined = scratch.appendingPathComponent("book.caf")
-        try Assemble.concatenate(cafURLs, to: combined)
+        let (renders, skipped) = try synthesizeChapters(of: book, in: scratchDir)
 
-        let m4a = scratch.appendingPathComponent("book.m4a")
+        let combined = scratchDir.appendingPathComponent("book.caf")
+        try Assemble.concatenate(renders.map(\.cafURL), to: combined)
+
+        let m4a = scratchDir.appendingPathComponent("book.m4a")
         try Encode.encodeCAF(from: combined, to: m4a)
 
-        // Brand patch, then write straight to the final output path.
-        let data = try Data(contentsOf: m4a)
-        try Brand.patchFTyp(in: data).write(to: output)
+        // Brand patch, then Chapter Markers (offsets computed from the known
+        // per-chapter frame counts), then write straight to the output path.
+        var data = try Data(contentsOf: m4a)
+        data = try Brand.patchFTyp(in: data)
+        let offsets = ChapterMarkers.startOffsets(frameCounts: renders.map(\.frameCount))
+        let markers = zip(offsets, renders).map { ChapterMarker(sampleOffset: $0, title: $1.title) }
+        data = try ChapterMarkers.insertChpl(markers: markers, trackTimescale: Int(Synthesis.sampleRate), into: data)
+        try data.write(to: output)
 
-        try FileManager.default.removeItem(at: scratch)
+        let totalSeconds = Double(renders.reduce(0) { $0 + $1.frameCount }) / Synthesis.sampleRate
+        report(summaryLine(
+            chapters: book.chapters.count,
+            skipped: skipped,
+            duration: totalSeconds,
+            sizeInBytes: data.count,
+            path: output.path
+        ))
+
+        try FileManager.default.removeItem(at: scratchDir)
         return 0
     } catch Epub.EpubError.notAValidEpub {
         report("error: Not a valid EPUB: \(input.path)")
@@ -54,52 +71,88 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
         report("error: \(error.message)")
         return 1
     } catch {
-        report("error: \(error) (scratch kept: \(scratch.path))")
+        let kept = scratch.map { " (scratch kept: \($0.path))" } ?? ""
+        report("error: \(error)\(kept)")
         return 2
     }
 }
 
 // MARK: - Per-chapter synthesis
 
-/// Synthesises each Chapter to its own CAF (in Spine order) and reports one
-/// progress line per completed Chapter on stderr.
+/// A synthesised (or cached) Chapter's audio: its CAF plus the exact PCM
+/// frame count the Chapter Marker offsets are computed from.
+private struct ChapterRender {
+    let title: String
+    let cafURL: URL
+    let frameCount: Int
+}
+
+/// Synthesises each non-empty Chapter to its own CAF (in Spine order) and
+/// reports one progress line per Chapter on stderr. A Chapter whose CAF
+/// already exists in Scratch is skipped (resume: existence = state).
 @MainActor
-private func synthesizeChapters(of book: Book, in scratch: URL) throws -> [URL] {
+private func synthesizeChapters(of book: Book, in scratch: URL) throws -> (renders: [ChapterRender], skipped: Int) {
     let chaptersDir = scratch.appendingPathComponent("chapters")
     try FileManager.default.createDirectory(at: chaptersDir, withIntermediateDirectories: true)
 
-    var cafURLs: [URL] = []
+    var renders: [ChapterRender] = []
+    var skipped = 0
     for (index, chapter) in book.chapters.enumerated() {
         let number = index + 1
-        var duration: TimeInterval = 0
 
-        if !chapter.text.isEmpty {
-            let cafURL = chaptersDir.appendingPathComponent(String(format: "chapter-%03d.caf", number))
+        guard !chapter.text.isEmpty else {
+            // Empty Chapter: no audio, no Chapter Marker.
+            skipped += 1
+            report("– \(number)/\(book.chapters.count) · \(chapter.title) · (no text)")
+            continue
+        }
+
+        let cafURL = chaptersDir.appendingPathComponent(String(format: "chapter-%03d.caf", number))
+        let frameCount: Int
+        if FileManager.default.fileExists(atPath: cafURL.path) {
+            frameCount = try cafFrameCount(at: cafURL)
+            report("⏭ \(number)/\(book.chapters.count) · \(chapter.title) · \(formatDuration(Double(frameCount) / Synthesis.sampleRate)) (cached)")
+        } else {
             let utterance = AVSpeechUtterance(string: chapter.text)
             utterance.voice = AVSpeechSynthesisVoice(language: book.language) ?? AVSpeechSynthesisVoice()
             try Synthesis.render(utterance: utterance, to: cafURL)
-            duration = try cafDuration(at: cafURL)
-            cafURLs.append(cafURL)
+            frameCount = try cafFrameCount(at: cafURL)
+            report("✓ \(number)/\(book.chapters.count) · \(chapter.title) · \(formatDuration(Double(frameCount) / Synthesis.sampleRate))")
         }
-
-        report("✓ \(number)/\(book.chapters.count) · \(chapter.title) · \(formatDuration(duration))")
+        renders.append(ChapterRender(title: chapter.title, cafURL: cafURL, frameCount: frameCount))
     }
 
-    guard !cafURLs.isEmpty else {
+    guard !renders.isEmpty else {
         throw SaybookError(message: "No readable chapters in \(book.title)")
     }
-    return cafURLs
+    return (renders, skipped)
 }
 
-private func cafDuration(at url: URL) throws -> TimeInterval {
+/// The exact PCM frame count of a CAF (1 frame per sample, mono).
+private func cafFrameCount(at url: URL) throws -> Int {
     let file = try AVAudioFile(forReading: url)
-    return Double(file.length) / file.processingFormat.sampleRate
+    return Int(file.length)
 }
 
 /// m:ss (e.g. `2:31`); minutes grow unbounded.
 private func formatDuration(_ seconds: TimeInterval) -> String {
     let total = Int(seconds.rounded())
     return "\(total / 60):" + String(format: "%02d", total % 60)
+}
+
+/// The final summary line: chapter count, skipped count, total duration,
+/// output size, and output path.
+private func summaryLine(chapters: Int, skipped: Int, duration: TimeInterval, sizeInBytes: Int, path: String) -> String {
+    "Chapters: \(chapters) · Skipped: \(skipped) · Duration: \(formatDuration(duration)) · Size: \(formatSize(sizeInBytes)) · Path: \(path)"
+}
+
+/// KB/MB/GB with one decimal (1024-based).
+private func formatSize(_ bytes: Int) -> String {
+    let kib = Double(bytes) / 1024
+    if kib < 1024 { return String(format: "%.1f KB", kib) }
+    let mib = kib / 1024
+    if mib < 1024 { return String(format: "%.1f MB", mib) }
+    return String(format: "%.1f GB", mib / 1024)
 }
 
 private func report(_ line: String) {

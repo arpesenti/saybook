@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 (Skeleton — one-chapter Book to playable M4B)
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] A 3-chapter fixture produces one M4B with exactly 3 Chapter Markers (`chpl`), each carrying the Chapter's title
 - [ ] Marker offsets land at the true Chapter boundaries (within one AAC frame), verified by a test that parses the `chpl` and compares against known PCM lengths

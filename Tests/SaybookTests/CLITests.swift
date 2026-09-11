@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import XCTest
+@testable import SaybookCore
 
 /// End-to-end tests of the `saybook` executable: run the real binary against
 /// the in-repo fixture and assert CLI behaviour (exit codes, output location,
@@ -108,5 +109,168 @@ final class CLITests: XCTestCase {
         let result = try run([dir.appendingPathComponent("nope.epub").path])
         XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("nope.m4b").path))
+    }
+
+    // MARK: - Ticket 02: Chapter Markers, resume, summary
+
+    func testThreeChapterBookProducesM4BWithChapterMarkersAndSummary() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("three-chapter.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let data = try Data(contentsOf: expected)
+
+        // One progress line per Chapter; the final summary line reports
+        // chapter count, skipped count, duration, size, and path.
+        let lines = result.stderr.split(separator: "\n").map(String.init)
+        let progress = lines.filter { $0.hasPrefix("✓") }
+        XCTAssertEqual(progress.count, 3, "stderr: \(result.stderr)")
+        let summary = lines.filter { $0.hasPrefix("Chapters:") }
+        XCTAssertEqual(summary.count, 1, "stderr: \(result.stderr)")
+        let s = summary[0]
+        XCTAssertTrue(s.contains("Chapters: 3"), s)
+        XCTAssertTrue(s.contains("Skipped: 0"), s)
+        XCTAssertTrue(s.contains(expected.path), s)
+
+        // Exactly 3 Chapter Markers, each carrying the Chapter's title
+        // (heading fallback: h1, h2, filename).
+        let markers = ChapterMarkers.parseChpl(from: data, trackTimescale: 22_050)
+        XCTAssertEqual(markers?.count, 3, "stderr: \(result.stderr)")
+        XCTAssertEqual(markers?.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
+
+        // Offsets: chapter 1 at 0, strictly increasing, in track timescale.
+        let offsets = markers?.map(\.sampleOffset) ?? []
+        XCTAssertEqual(offsets.first, 0)
+        for (a, b) in Swift.zip(offsets, offsets.dropFirst()) where b <= a {
+            XCTFail("offsets must be strictly increasing: \(offsets)")
+        }
+
+        // Total duration ≈ 13 + 184 + 248 words at the default voice
+        // (measured ≈ 139 s on macOS 26; the repeated sentences in ch2/ch3
+        // read slightly faster than the 0.33 s/word single-chapter baseline).
+        let file = try AVAudioFile(forReading: expected)
+        let duration = Double(file.length) / 22050
+        XCTAssertEqual(duration, 139, accuracy: 14, "duration: \(duration)")
+    }
+
+    func testResumeSkipsExistingChapters() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("three-chapter.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+
+        // Seed Scratch with finished Chapter CAFs of known PCM lengths:
+        // 22 050 (1 s tone), 11 025 (0.5 s silence), 33 075 (1.5 s tone).
+        let scratch = try Scratch.directory(for: input)
+        let frames = [22_050, 11_025, 33_075]
+        let cafs = (1...3).map {
+            scratch.appendingPathComponent("chapters").appendingPathComponent(String(format: "chapter-%03d.caf", $0))
+        }
+        for (i, caf) in cafs.enumerated() {
+            try FileManager.default.createDirectory(at: caf.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let amp: Float = i == 1 ? 0 : 0.5
+            try writeCAF(frames: frames[i], at: caf) { _ in amp }
+        }
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        // All three progress lines are cached-skip lines: no re-synthesis
+        // (a re-synthesised book would be ≈ 60 s of speech, not 3 s).
+        let lines = result.stderr.split(separator: "\n").map(String.init)
+        let cached = lines.filter { $0.hasPrefix("⏭") }
+        XCTAssertEqual(cached.count, 3, "stderr: \(result.stderr)")
+        XCTAssertTrue(cached.allSatisfy { $0.contains("(cached)") })
+
+        // The Chapter Marker offsets match the known PCM lengths exactly:
+        // chapter k starts where the preceding CAFs end.
+        let markers = ChapterMarkers.parseChpl(from: try Data(contentsOf: expected), trackTimescale: 22_050)
+        XCTAssertEqual(markers?.map(\.sampleOffset), [0, 22_050, 33_075], "stderr: \(result.stderr)")
+        XCTAssertEqual(markers?.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
+
+        // The output is the concatenation of the cached CAFs: ≈ 3 s, and it
+        // carries their content (tone · silence · tone), not speech.
+        let file = try AVAudioFile(forReading: expected)
+        let duration = Double(file.length) / 22050
+        XCTAssertEqual(duration, 3.0, accuracy: 0.3, "duration: \(duration)")
+        let raw = dir.appendingPathComponent("raw.f32")
+        try decodeToFloatPCM(expected, at: raw)
+        let pcm = try Data(contentsOf: raw)
+        XCTAssertGreaterThan(rms(of: pcm, from: 0, count: 22_050), 0.1, "chapter 1 tone")
+        XCTAssertLessThan(rms(of: pcm, from: 22_050, count: 11_025), 0.01, "chapter 2 silence")
+        XCTAssertGreaterThan(rms(of: pcm, from: 33_075, count: 33_075), 0.1, "chapter 3 tone")
+    }
+
+    func testKilledRunResumesAndCompletes() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("three-chapter.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+        let scratch = try Scratch.directory(for: input)
+        func cafURL(_ n: Int) -> URL {
+            scratch.appendingPathComponent("chapters").appendingPathComponent(String(format: "chapter-%03d.caf", n))
+        }
+
+        // Run, then kill mid-way: chapter 1 (13 words ≈ 4 s of audio) is
+        // done well before the kill; chapter 3 (248 words ≈ 83 s of audio)
+        // keeps the kill window open. Whatever the kill lands on, the
+        // completed chapters' CAFs must survive and be skipped on the re-run.
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = [input.path]
+        try process.run()
+        Thread.sleep(forTimeInterval: 1.1)
+        kill(process.processIdentifier, SIGKILL)
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationReason, .uncaughtSignal, "first run should be killed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path), "killed run must not write output")
+
+        // The surviving chapter CAFs form a prefix (chapters render in
+        // Spine order); at least chapter 1 completed before the kill.
+        let surviving = (1...3).filter { FileManager.default.fileExists(atPath: cafURL($0).path) }
+        XCTAssertEqual(surviving, Array(1...surviving.count), "surviving CAFs must be a prefix: \(scratch.path)")
+        XCTAssertFalse(surviving.isEmpty, "no chapter CAF survived the kill: \(scratch.path)")
+        if surviving.count < 3 {
+            // The chapter that was mid-render must not have published a
+            // partial CAF at its final name (atomic publish).
+            let next = cafURL(surviving.count + 1)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: next.path), "mid-render chapter published a partial CAF")
+        }
+        let frames = try surviving.map { try cafFrameCount(at: cafURL($0)) }
+
+        // Re-run: resumes from Scratch and completes.
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        // Every surviving chapter was skipped, not re-synthesised.
+        for n in surviving {
+            XCTAssertTrue(result.stderr.contains("⏭ \(n)/3"), "chapter \(n) not reported cached: \(result.stderr)")
+        }
+        // Scratch is deleted on success.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratch.path), "scratch kept after success")
+
+        // The final Audiobook is complete and correct: 3 markers with the
+        // Chapter titles, and each cached chapter's offset is exactly the
+        // end of the preceding chapters' known PCM.
+        let markers = ChapterMarkers.parseChpl(from: try Data(contentsOf: expected), trackTimescale: 22_050)
+        XCTAssertEqual(markers?.count, 3, "stderr: \(result.stderr)")
+        XCTAssertEqual(markers?.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
+        var cumulative = 0
+        for (n, frameCount) in Swift.zip(surviving, frames) {
+            XCTAssertEqual(markers?[n - 1].sampleOffset, cumulative, "cached chapter \(n) offset")
+            cumulative += frameCount
+        }
+        let file = try AVAudioFile(forReading: expected)
+        let duration = Double(file.length) / 22050
+        XCTAssertEqual(duration, 139, accuracy: 14, "duration: \(duration)")
     }
 }

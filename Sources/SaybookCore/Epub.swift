@@ -11,7 +11,9 @@ public struct Book: Sendable {
 
 /// One readable Spine document with its v1-crude text (whole document, one utterance).
 public struct Chapter: Sendable {
-    /// v1 title: the document filename without extension (refined in ticket 02).
+    /// The document's largest heading (h1 … h6), or the filename without
+    /// extension when the document carries no heading. EPUB3 nav titles
+    /// arrive in ticket 03.
     public let title: String
     /// All document text, whitespace-normalised.
     public let text: String
@@ -43,9 +45,10 @@ public enum Epub {
             else { continue }
             let fileURL = opfURL.deletingLastPathComponent().appendingPathComponent(item.href)
             let text = try readUTF8(fileURL)
+            let filename = fileURL.deletingPathExtension().lastPathComponent
             chapters.append(
                 Chapter(
-                    title: fileURL.deletingPathExtension().lastPathComponent,
+                    title: chapterTitle(from: text, filename: filename),
                     text: extractText(from: text)
                 )
             )
@@ -154,12 +157,35 @@ public enum Epub {
 
     // MARK: - Text extraction (v1 crude: whole document, one utterance)
 
+    /// The document's title: the first non-empty largest heading (h1 first,
+    /// then h2 … h6), or `filename` when the document has no heading text.
+    private static func chapterTitle(from html: String, filename: String) -> String {
+        // One pass over all headings: (open level, inner markup, close level).
+        let regex = /(?is)<h([1-6])\b[^>]*>(.*?)<\/h([1-6])>/
+        var innerByLevel: [Int: [Substring]] = [:]
+        for match in html.matches(of: regex) where match.1 == match.3 {
+            guard let level = Int(match.1) else { continue }
+            innerByLevel[level, default: []].append(match.2)
+        }
+        for level in 1...6 {
+            for inner in innerByLevel[level] ?? [] {
+                let text = normalize(decodeEntities(stripMarkup(String(inner))))
+                if !text.isEmpty { return text }
+            }
+        }
+        return filename
+    }
+
     private static func extractText(from html: String) -> String {
-        let text = html
+        normalize(decodeEntities(stripMarkup(html)))
+    }
+
+    /// Removes scripts, styles, and all tags from XHTML markup.
+    private static func stripMarkup(_ html: String) -> String {
+        html
             .replacing(/(?is)<script\b[^>]*>.*?<\/script>/, with: "")
             .replacing(/(?is)<style\b[^>]*>.*?<\/style>/, with: "")
             .replacing(/<[^>]+>/, with: "")
-        return normalize(decodeEntities(text))
     }
 
     /// Collapses whitespace runs to single spaces.
