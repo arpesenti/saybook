@@ -67,4 +67,93 @@ final class EpubTests: XCTestCase {
             XCTAssertEqual($0 as? Epub.EpubError, .notAValidEpub)
         }
     }
+
+    // MARK: - Ticket 03: metadata, cover, navigation
+
+    /// The 1×1 PNG the `nav-cover.epub` fixture declares as its cover
+    /// (known-good literal — the fixture's bytes are pinned to this).
+    private static let coverPNG: Data = Data(
+        base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+    )!
+
+    /// EPUB3 with a navigation document, a TOC page and a titlepage (both
+    /// `linear="no"`), a cover page (`properties="doc-cover"`, deliberately
+    /// without `linear="no"` — the property rule alone must exclude it), a
+    /// declared cover image, and two chapters whose headings deliberately
+    /// differ from the nav titles.
+    func testLoadNavCoverFixture() throws {
+        let scratch = try makeTempDir()
+        let book = try Epub.load(
+            bookAt: fixturesDir.appendingPathComponent("nav-cover.epub"),
+            scratch: scratch
+        )
+
+        XCTAssertEqual(book.title, "Nav and Cover Book")
+        XCTAssertEqual(book.author, "Nav Author")
+        // Exactly the two readable chapters: the cover page, TOC page,
+        // titlepage and nav document are never spoken.
+        XCTAssertEqual(book.chapters.count, 2)
+        // Titles come from the navigation entries (not the document headings
+        // "Heading One"/"Heading Two"); the nav anchor's #fragment is ignored.
+        XCTAssertEqual(book.chapters.map(\.title), ["First Voyage", "Second Voyage"])
+        // The spoken text is the chapters' own text only (v1 crude: heading
+        // included; block-level extraction arrives in ticket 05) — and none
+        // of the never-spoken documents' text leaks in.
+        XCTAssertEqual(
+            book.chapters.map(\.text),
+            [
+                "Heading One Heading One The short first chapter text.",
+                "Heading Two Heading Two The short second chapter text.",
+            ]
+        )
+        XCTAssertTrue(book.chapters.allSatisfy { !$0.text.contains("never be spoken") })
+        // The OPF declares a cover image: its raw bytes are carried.
+        XCTAssertEqual(book.cover, .data(Self.coverPNG))
+    }
+
+    /// The OPF declares a cover whose file is absent from the archive: a
+    /// broken reference degrades to `.missing`, no crash.
+    func testLoadMissingCoverFixture() throws {
+        let scratch = try makeTempDir()
+        let book = try Epub.load(
+            bookAt: fixturesDir.appendingPathComponent("missing-cover.epub"),
+            scratch: scratch
+        )
+
+        XCTAssertEqual(book.title, "Broken Cover Book")
+        XCTAssertEqual(book.author, "Cover Author")
+        XCTAssertEqual(book.cover, .missing(reference: "missing.png"))
+        XCTAssertEqual(book.chapters.count, 1)
+        XCTAssertEqual(book.chapters.map(\.title), ["Only Chapter"])
+    }
+
+    /// A Book with no `dc:creator`: the author parses to empty (the
+    /// "Unknown" placeholder is applied at the metadata box, not here).
+    func testLoadNoAuthorFixture() throws {
+        let scratch = try makeTempDir()
+        let book = try Epub.load(
+            bookAt: fixturesDir.appendingPathComponent("no-author.epub"),
+            scratch: scratch
+        )
+
+        XCTAssertEqual(book.title, "No Author Book")
+        XCTAssertEqual(book.author, "")
+        XCTAssertEqual(book.cover, .absent)
+        XCTAssertEqual(book.chapters.map(\.title), ["Lone Chapter"])
+    }
+
+    /// An EPUB2 Book (no navigation document): the largest-heading →
+    /// filename fallback from ticket 02 still applies.
+    func testLoadEpub2FixtureUsesHeadingFallback() throws {
+        let scratch = try makeTempDir()
+        let book = try Epub.load(
+            bookAt: fixturesDir.appendingPathComponent("epub2.epub"),
+            scratch: scratch
+        )
+
+        XCTAssertEqual(book.title, "EPUB Two Book")
+        XCTAssertEqual(book.author, "Old Author")
+        XCTAssertEqual(book.cover, .absent)
+        XCTAssertEqual(book.chapters.map(\.title), ["Chapter Alpha", "Chapter Beta"])
+    }
 }

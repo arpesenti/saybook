@@ -10,6 +10,10 @@ public enum Synthesis {
     /// this package writes and of the concatenated Audiobook track.
     public static let sampleRate: Double = 22_050
 
+    /// The same rate as `Int`: the track timescale the Chapter Marker offsets
+    /// are expressed in.
+    public static let trackTimescale: Int = 22_050
+
     /// The engine's native output format: 22.05 kHz mono Float32 PCM.
     /// Never mutated after creation, hence the explicit non-Sendable escape hatch.
     nonisolated(unsafe) public static let cafSettings: [String: Any] = [

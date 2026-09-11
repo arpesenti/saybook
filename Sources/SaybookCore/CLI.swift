@@ -44,13 +44,23 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
         let m4a = scratchDir.appendingPathComponent("book.m4a")
         try Encode.encodeCAF(from: combined, to: m4a)
 
-        // Brand patch, then Chapter Markers (offsets computed from the known
-        // per-chapter frame counts), then write straight to the output path.
+        // Brand patch, then the Book's identity (ilst + covr), then Chapter
+        // Markers (offsets computed from the known per-chapter frame counts),
+        // then write straight to the output path. The identity degrades
+        // gracefully: a failed box write keeps the file with a warning.
         var data = try Data(contentsOf: m4a)
         data = try Brand.patchFTyp(in: data)
+        do {
+            data = try Metadata.insert(BookMetadata(book: book), into: data)
+        } catch {
+            report("warning: could not write title/author metadata: \(error)")
+        }
+        if case let .missing(reference) = book.cover {
+            report("warning: cover image \"\(reference)\" declared but not found; no cover written")
+        }
         let offsets = ChapterMarkers.startOffsets(frameCounts: renders.map(\.frameCount))
         let markers = zip(offsets, renders).map { ChapterMarker(sampleOffset: $0, title: $1.title) }
-        data = try ChapterMarkers.insertChpl(markers: markers, trackTimescale: Int(Synthesis.sampleRate), into: data)
+        data = try ChapterMarkers.insertChpl(markers: markers, trackTimescale: Synthesis.trackTimescale, into: data)
         try data.write(to: output)
 
         let totalSeconds = Double(renders.reduce(0) { $0 + $1.frameCount }) / Synthesis.sampleRate

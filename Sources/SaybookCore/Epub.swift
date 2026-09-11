@@ -5,22 +5,46 @@ public struct Book: Sendable {
     public let title: String
     public let author: String
     public let language: String
+    /// The Book's cover image, as declared in the OPF.
+    public let cover: CoverImage
     /// Readable Spine documents, in reading order.
     public let chapters: [Chapter]
+
+    /// The cover image the OPF declares (`properties="cover"` or the EPUB2
+    /// `<meta name="cover"/>` reference).
+    public enum CoverImage: Sendable, Equatable {
+        /// The OPF declares no cover image.
+        case absent
+        /// The raw image bytes of the OPF-declared cover.
+        case data(Data)
+        /// The OPF declares a cover whose file could not be read (a broken
+        /// reference): the run keeps going without a cover and reports a
+        /// warning.
+        case missing(reference: String)
+
+        /// The image bytes when the cover is present.
+        var imageData: Data? {
+            if case let .data(image) = self { return image }
+            return nil
+        }
+    }
 }
 
-/// One readable Spine document with its v1-crude text (whole document, one utterance).
+/// One readable Spine document with its v1-crude text (whole document, one
+/// utterance).
 public struct Chapter: Sendable {
-    /// The document's largest heading (h1 … h6), or the filename without
-    /// extension when the document carries no heading. EPUB3 nav titles
-    /// arrive in ticket 03.
+    /// The document's title: the EPUB3 navigation entry for the document
+    /// when present, else the document's largest heading (h1 … h6), else the
+    /// filename without extension.
     public let title: String
     /// All document text, whitespace-normalised.
     public let text: String
 }
 
 /// Opens a non-DRM EPUB: unpacks it with the system `ditto` into Scratch and
-/// reads OPF metadata, Spine order, and each Chapter's text.
+/// reads OPF metadata (title/author/language/cover), Spine order, each
+/// Chapter's text, and Chapter titles from the EPUB3 navigation document
+/// when present.
 ///
 /// Parsing is deliberately crude (regex over machine-generated, well-formed
 /// EPUB XML) to stay dependency-free; ticket 05's block-level extraction will
@@ -33,22 +57,43 @@ public enum Epub {
         case notAValidEpub
     }
 
+    /// `properties` values marking a Spine document as never spoken: the
+    /// EPUB3 navigation document, cover pages, and titlepage-type documents
+    /// (`nav`, `cover`, `doc-cover`, `doc-titlepage`).
+    private static let neverSpokenProperties: Set<String> = [
+        "nav", "cover", "doc-cover", "doc-titlepage",
+    ]
+
     public static func load(bookAt url: URL, scratch: URL) throws -> Book {
         try unpack(bookAt: url, into: scratch)
         let opfURL = try opfURL(in: scratch)
         let opf = try parseOPF(at: opfURL)
+        let opfDir = opfURL.deletingLastPathComponent()
+
+        // Chapter titles from the EPUB3 navigation document when present;
+        // otherwise the largest-heading → filename fallback applies.
+        let navItem = opf.itemOrder.compactMap { opf.items[$0] }.first { $0.properties.contains("nav") }
+        let navTitles = navTitles(of: navItem, relativeTo: opfDir)
+
+        // The cover image the OPF declares, if any.
+        let cover = coverImage(declaredBy: opf, opfDir: opfDir)
 
         var chapters: [Chapter] = []
-        for idref in opf.spine {
-            guard let item = opf.items[idref],
+        for ref in opf.spine {
+            guard let item = opf.items[ref.idref],
                   item.mediaType.localizedCaseInsensitiveContains("html")
             else { continue }
-            let fileURL = opfURL.deletingLastPathComponent().appendingPathComponent(item.href)
+            // Navigation, cover and titlepage Spine documents are never
+            // spoken.
+            if !ref.linear
+                || !Set(ref.properties).isDisjoint(with: neverSpokenProperties)
+                || !Set(item.properties).isDisjoint(with: neverSpokenProperties) { continue }
+            let fileURL = opfDir.appendingPathComponent(item.href)
             let text = try readUTF8(fileURL)
             let filename = fileURL.deletingPathExtension().lastPathComponent
             chapters.append(
                 Chapter(
-                    title: chapterTitle(from: text, filename: filename),
+                    title: navTitles[fileURL.standardized.path] ?? chapterTitle(from: text, filename: filename),
                     text: extractText(from: text)
                 )
             )
@@ -59,6 +104,7 @@ public enum Epub {
             title: opf.title,
             author: opf.author,
             language: opf.language.isEmpty ? "en-US" : opf.language,
+            cover: cover,
             chapters: chapters
         )
     }
@@ -84,11 +130,26 @@ public enum Epub {
         var author = ""
         var language = ""
         var items: [String: Item] = [:]
-        var spine: [String] = []
+        /// Manifest order (dictionary order is not).
+        var itemOrder: [String] = []
+        var spine: [SpineRef] = []
+        /// The EPUB2 `<meta name="cover" content="…"/>` item id, when present.
+        var coverMetaID: String?
 
         struct Item {
             let href: String
             let mediaType: String
+            /// The `properties` attribute, whitespace-separated (e.g.
+            /// "nav", "cover").
+            let properties: [String]
+        }
+
+        struct SpineRef {
+            let idref: String
+            /// `linear="no"` documents (TOC, cover page, titlepage, …) are
+            /// never spoken.
+            let linear: Bool
+            let properties: [String]
         }
     }
 
@@ -120,13 +181,39 @@ public enum Epub {
         for item in xml.matches(of: /<item\b([^>]*?)\/>/) {
             let attrs = parseAttributes(item.1)
             guard let id = attrs["id"], let href = attrs["href"] else { continue }
-            opf.items[id] = OPF.Item(href: href, mediaType: attrs["media-type"] ?? "")
+            opf.items[id] = OPF.Item(
+                href: href,
+                mediaType: attrs["media-type"] ?? "",
+                properties: splitProperties(attrs["properties"])
+            )
+            opf.itemOrder.append(id)
         }
-        // <itemref idref="ch1"/>
-        for idref in xml.matches(of: /<itemref\b[^>]*\bidref\s*=\s*"([^"]+)"/) {
-            opf.spine.append(String(idref.1))
+        // <itemref idref="ch1" linear="no"/>
+        for idref in xml.matches(of: /<itemref\b([^>]*?)\/>/) {
+            let attrs = parseAttributes(idref.1)
+            guard let id = attrs["idref"] else { continue }
+            opf.spine.append(
+                OPF.SpineRef(
+                    idref: id,
+                    linear: attrs["linear"] != "no",
+                    properties: splitProperties(attrs["properties"])
+                )
+            )
+        }
+        // <meta name="cover" content="cover"/> (EPUB2 cover declaration)
+        for meta in xml.matches(of: /<meta\b([^>]*?)\/>/) {
+            let attrs = parseAttributes(meta.1)
+            if attrs["name"] == "cover" || attrs["name"] == "cover-image" {
+                opf.coverMetaID = attrs["content"]
+                break
+            }
         }
         return opf
+    }
+
+    /// A whitespace-separated `properties` attribute as a list.
+    private static func splitProperties(_ raw: String?) -> [String] {
+        (raw ?? "").split(separator: " ").map(String.init)
     }
 
     /// The first capture group of `regex` in `xml`, entity-decoded and trimmed.
@@ -153,6 +240,52 @@ public enum Epub {
             attrs[String(m.1)] = String(m.2)
         }
         return attrs
+    }
+
+    // MARK: - Navigation & cover
+
+    /// Chapter titles from the EPUB3 navigation document: each anchor's
+    /// `href` (resolved against the nav document; the URL's `path` drops any
+    /// fragment) mapped to the anchor's text, keyed by the document's
+    /// absolute path so the Spine lookup is `fileURL.standardized.path`. A
+    /// missing or unreadable nav document yields no titles (the heading →
+    /// filename fallback then applies); the first entry wins per document.
+    private static func navTitles(of navItem: OPF.Item?, relativeTo opfDir: URL) -> [String: String] {
+        guard let navItem else { return [:] }
+        let navURL = opfDir.appendingPathComponent(navItem.href)
+        guard let html = try? readUTF8(navURL) else { return [:] }
+        var titles: [String: String] = [:]
+        for match in html.matches(of: /<a\b[^>]*\bhref\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/a>/) {
+            guard let resolved = URL(string: String(match.1), relativeTo: navURL),
+                  !resolved.standardized.path.isEmpty
+            else { continue }
+            let title = normalize(decodeEntities(stripMarkup(String(match.2))))
+            guard !title.isEmpty else { continue }
+            titles[resolved.standardized.path, default: title] = title
+        }
+        return titles
+    }
+
+    /// The raw image bytes of the cover the OPF declares: EPUB3 marks it
+    /// with a `cover` property (manifest item or Spine itemref), EPUB2 with
+    /// `<meta name="cover" content="item-id"/>`. A declared cover whose file
+    /// is missing or unreadable is `.missing` (a broken reference degrades
+    /// to a warning, not a failure).
+    private static func coverImage(declaredBy opf: OPF, opfDir: URL) -> Book.CoverImage {
+        var coverID: String?
+        for id in opf.itemOrder {
+            let spineMarksCover = opf.spine.first { $0.idref == id }?.properties.contains("cover") ?? false
+            let itemMarksCover = opf.items[id]?.properties.contains("cover") ?? false
+            if spineMarksCover || itemMarksCover {
+                coverID = id
+                break
+            }
+        }
+        if coverID == nil { coverID = opf.coverMetaID }
+        guard let id = coverID, let item = opf.items[id] else { return .absent }
+        let fileURL = opfDir.appendingPathComponent(item.href)
+        guard let data = try? Data(contentsOf: fileURL) else { return .missing(reference: item.href) }
+        return .data(data)
     }
 
     // MARK: - Text extraction (v1 crude: whole document, one utterance)

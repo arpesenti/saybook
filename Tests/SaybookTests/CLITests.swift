@@ -145,7 +145,7 @@ final class CLITests: XCTestCase {
 
         // Exactly 3 Chapter Markers (the empty chapter carries none), each
         // carrying the Chapter's title (heading fallback: h1, h2, filename).
-        let markers = ChapterMarkers.parseChpl(from: data, trackTimescale: Int(Synthesis.sampleRate))
+        let markers = ChapterMarkers.parseChpl(from: data, trackTimescale: Synthesis.trackTimescale)
         XCTAssertEqual(markers?.count, 3, "stderr: \(result.stderr)")
         XCTAssertEqual(markers?.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
 
@@ -198,7 +198,7 @@ final class CLITests: XCTestCase {
 
         // The Chapter Marker offsets match the known PCM lengths exactly:
         // chapter k starts where the preceding CAFs end.
-        let markers = ChapterMarkers.parseChpl(from: try Data(contentsOf: expected), trackTimescale: Int(Synthesis.sampleRate))
+        let markers = ChapterMarkers.parseChpl(from: try Data(contentsOf: expected), trackTimescale: Synthesis.trackTimescale)
         XCTAssertEqual(markers?.map(\.sampleOffset), [0, 22_050, 33_075], "stderr: \(result.stderr)")
         XCTAssertEqual(markers?.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
 
@@ -213,6 +213,93 @@ final class CLITests: XCTestCase {
         XCTAssertGreaterThan(rms(of: pcm, from: 0, count: 22_050), 0.1, "chapter 1 tone")
         XCTAssertLessThan(rms(of: pcm, from: 22_050, count: 11_025), 0.01, "chapter 2 silence")
         XCTAssertGreaterThan(rms(of: pcm, from: 33_075, count: 33_075), 0.1, "chapter 3 tone")
+    }
+
+    // MARK: - Ticket 03: metadata, cover, navigation
+
+    /// The 1×1 PNG the `nav-cover.epub` fixture declares as its cover.
+    private static let coverPNG: Data = Data(
+        base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+    )!
+
+    func testNavCoverBookCarriesMetadataCoverAndNavTitles() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("nav-cover.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        // Only the two readable chapters are spoken: the TOC page,
+        // titlepage and navigation document are never synthesised.
+        let lines = result.stderr.split(separator: "\n").map(String.init)
+        let progress = lines.filter { $0.hasPrefix("✓") }
+        XCTAssertEqual(progress.count, 2, "stderr: \(result.stderr)")
+
+        let data = try Data(contentsOf: expected)
+
+        // ilst: title = Book title, artist = author, album = Book title.
+        let identity = Metadata.parseIlst(from: data)
+        XCTAssertEqual(identity?.title, "Nav and Cover Book", "stderr: \(result.stderr)")
+        XCTAssertEqual(identity?.artist, "Nav Author")
+        XCTAssertEqual(identity?.album, "Nav and Cover Book")
+
+        // covr: the OPF-declared cover image, extractable from the file.
+        XCTAssertEqual(Metadata.parseCovr(from: data), Self.coverPNG)
+
+        // Chapter Marker titles come from the EPUB3 navigation entries, not
+        // the document headings.
+        let markers = ChapterMarkers.parseChpl(from: data, trackTimescale: Synthesis.trackTimescale)
+        XCTAssertEqual(markers?.count, 2)
+        XCTAssertEqual(markers?.map(\.title), ["First Voyage", "Second Voyage"])
+    }
+
+    /// A deliberately broken cover reference (declared, file absent): the
+    /// run keeps going — the Audiobook is still written with its metadata,
+    /// minus the cover — and a warning is emitted.
+    func testBrokenCoverDegradesGracefully() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("missing-cover.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let warning = result.stderr.lowercased()
+        XCTAssertTrue(warning.contains("warning"), "stderr: \(result.stderr)")
+        XCTAssertTrue(warning.contains("cover"), "stderr: \(result.stderr)")
+
+        // The file is still written, with its identity but no cover box.
+        let data = try Data(contentsOf: expected)
+        XCTAssertEqual(Metadata.parseIlst(from: data)?.title, "Broken Cover Book")
+        XCTAssertEqual(Metadata.parseIlst(from: data)?.artist, "Cover Author")
+        XCTAssertNil(Metadata.parseCovr(from: data))
+    }
+
+    /// A Book with no author: the `©ART` box degrades to "Unknown" rather
+    /// than being empty; no cover is declared, so no `covr` box is written.
+    func testMissingAuthorWritesUnknownArtist() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("no-author.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let data = try Data(contentsOf: expected)
+        XCTAssertEqual(Metadata.parseIlst(from: data)?.title, "No Author Book")
+        XCTAssertEqual(Metadata.parseIlst(from: data)?.artist, "Unknown")
+        XCTAssertEqual(Metadata.parseIlst(from: data)?.album, "No Author Book")
+        XCTAssertNil(Metadata.parseCovr(from: data))
     }
 
     func testKilledRunResumesAndCompletes() throws {
@@ -267,7 +354,7 @@ final class CLITests: XCTestCase {
         // The final Audiobook is complete and correct: 3 markers with the
         // Chapter titles, and each cached chapter's offset is exactly the
         // end of the preceding chapters' known PCM.
-        let markers = ChapterMarkers.parseChpl(from: try Data(contentsOf: expected), trackTimescale: Int(Synthesis.sampleRate))
+        let markers = ChapterMarkers.parseChpl(from: try Data(contentsOf: expected), trackTimescale: Synthesis.trackTimescale)
         XCTAssertEqual(markers?.count, 3, "stderr: \(result.stderr)")
         XCTAssertEqual(markers?.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
         var cumulative = 0

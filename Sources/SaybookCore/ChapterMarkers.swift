@@ -57,7 +57,7 @@ public enum ChapterMarkers {
     /// width of the on-disk fields); both are far beyond real books.
     public static func box(markers: [ChapterMarker], trackTimescale: Int) -> Data {
         var out: [UInt8] = []
-        out += u32(0) // size placeholder
+        out += Mp4.u32(0) // size placeholder
         out += Array("chpl".utf8)
         out += [0x01] // version
         out += [0, 0, 0] // flags
@@ -69,7 +69,7 @@ public enum ChapterMarkers {
             out.append(UInt8(titleBytes.count))
             out += Array(titleBytes)
         }
-        out.replaceSubrange(0..<4, with: u32(UInt32(out.count)))
+        out.replaceSubrange(0..<4, with: Mp4.u32(UInt32(out.count)))
         return Data(out)
     }
 
@@ -83,30 +83,11 @@ public enum ChapterMarkers {
     /// preserved, so the media data the `stco` offsets point at does not
     /// shift.
     public static func insert(box: Data, into data: Data) throws -> Data {
-        let top = topLevelBoxes(in: data)
-        guard let moov = top.last, moov.type == "moov", moov.range.upperBound == data.count else {
-            throw moovIsAbsent(top) ? ChapterMarkerError.noMoovBox : ChapterMarkerError.moovNotLast
+        do {
+            return try Mp4.appendToMoovUdta(box, into: data)
+        } catch let error as Mp4.Mp4Error {
+            throw error == .noMoovBox ? ChapterMarkerError.noMoovBox : ChapterMarkerError.moovNotLast
         }
-
-        var out = [UInt8](data)
-        let boxBytes = [UInt8](box)
-        let moovChildren = topLevelBoxes(in: data, moov.range)
-
-        if let udta = moovChildren.last(where: { $0.type == "udta" }),
-           udta.range.upperBound == moov.range.upperBound {
-            // Extend the last udta (and moov) to cover the appended box.
-            setU32(&out, at: udta.range.lowerBound, UInt32(udta.range.count + boxBytes.count))
-            setU32(&out, at: moov.range.lowerBound, UInt32(moov.range.count + boxBytes.count))
-            out += boxBytes
-        } else {
-            // No trailing udta: append a new one as moov's last child.
-            var udtaBytes = u32(UInt32(8 + boxBytes.count))
-            udtaBytes += Array("udta".utf8)
-            udtaBytes += boxBytes
-            setU32(&out, at: moov.range.lowerBound, UInt32(moov.range.count + udtaBytes.count))
-            out += udtaBytes
-        }
-        return Data(out)
     }
 
     /// Convenience: build the box for `markers` and insert it.
@@ -120,9 +101,9 @@ public enum ChapterMarkers {
     /// `moov`: AVAssetExportSession output already carries one (encoder
     /// metadata), and the `chpl` box lives in the one appended here.
     public static func parseChpl(from data: Data, trackTimescale: Int) -> [ChapterMarker]? {
-        guard let moov = topLevelBoxes(in: data).first(where: { $0.type == "moov" }) else { return nil }
-        for udta in topLevelBoxes(in: data, moov.range) where udta.type == "udta" {
-            if let chpl = topLevelBoxes(in: data, udta.range).first(where: { $0.type == "chpl" }) {
+        guard let moov = Mp4.topLevelBoxes(in: data).first(where: { $0.type == "moov" }) else { return nil }
+        for udta in Mp4.topLevelBoxes(in: data, moov.range) where udta.type == "udta" {
+            if let chpl = Mp4.topLevelBoxes(in: data, udta.range).first(where: { $0.type == "chpl" }) {
                 return Self.parseChplPayload(chpl.range, in: data, trackTimescale: trackTimescale)
             }
         }
@@ -160,59 +141,10 @@ public enum ChapterMarkers {
 
     // MARK: - Internals
 
-    private struct Box {
-        /// 0-based byte range within the data.
-        let range: Range<Int>
-        let type: String
-    }
-
-    private static func topLevelBoxes(in data: Data, _ parent: Range<Int>? = nil) -> [Box] {
-        let bounds = parent.map { (from: $0.lowerBound + 8, to: $0.upperBound) } ?? (from: 0, to: data.count)
-        var o = bounds.from
-        var boxes: [Box] = []
-        while o + 8 <= bounds.to {
-            let size32 = (UInt32(data[data.startIndex + o]) << 24)
-                | (UInt32(data[data.startIndex + o + 1]) << 16)
-                | (UInt32(data[data.startIndex + o + 2]) << 8)
-                | UInt32(data[data.startIndex + o + 3])
-            let size: Int
-            if size32 == 1 {
-                var large: UInt64 = 0
-                for k in 0..<8 { large = (large << 8) | UInt64(data[data.startIndex + o + 8 + k]) }
-                size = Int(large)
-            } else {
-                size = Int(size32)
-            }
-            guard size >= 8, o + size <= bounds.to else { break }
-            let type = String(bytes: data[(data.startIndex + o + 4)..<(data.startIndex + o + 8)], encoding: .isoLatin1) ?? "?"
-            boxes.append(Box(range: o..<(o + size), type: type))
-            o += size
-        }
-        return boxes
-    }
-
-    private static func moovIsAbsent(_ boxes: [Box]) -> Bool {
-        boxes.allSatisfy { $0.type != "moov" }
-    }
-
     /// Exact integer conversion: samples (track timescale) → 100 ns units,
     /// half-up rounded.
     private static func hundredNanoUnits(from sampleOffset: Int, trackTimescale: Int) -> [UInt8] {
         let value = (Int64(sampleOffset) * 10_000_000 + Int64(trackTimescale) / 2) / Int64(trackTimescale)
-        return u64(UInt64(bitPattern: value))
-    }
-
-    private static func u32(_ v: UInt32) -> [UInt8] {
-        withUnsafeBytes(of: v.bigEndian) { Array($0) }
-    }
-
-    private static func u64(_ v: UInt64) -> [UInt8] {
-        withUnsafeBytes(of: v.bigEndian) { Array($0) }
-    }
-
-    /// Overwrites the 4 bytes at `offset` with `value` (big-endian).
-    private static func setU32(_ bytes: inout [UInt8], at offset: Int, _ value: UInt32) {
-        let be = u32(value)
-        for k in 0..<4 { bytes[offset + k] = be[k] }
+        return Mp4.u64(UInt64(bitPattern: value))
     }
 }
