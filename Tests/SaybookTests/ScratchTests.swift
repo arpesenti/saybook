@@ -92,4 +92,26 @@ final class ScratchTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: scratch.appendingPathComponent("OEBPS").path))
         XCTAssertEqual(try String(contentsOf: Scratch.optionsURL(in: scratch), encoding: .utf8), marker())
     }
+
+    // MARK: - Ticket 05: per-Block CAF naming
+
+    func testBlockAndPauseCAFURLsLiveInTheChaptersDirectory() throws {
+        let scratch = try makeTempDir()
+        let block = Scratch.blockCAFURL(in: scratch, index: 3, block: 1)
+        let pause = Scratch.pauseCAFURL(in: scratch, index: 3, block: 2)
+
+        // Per-Block parts live beside the Chapter CAF (the same directory
+        // `ensureOptions` clears), named so a chapter's parts sort together.
+        XCTAssertEqual(
+            block,
+            scratch.appendingPathComponent("chapters/chapter-003-block-001.caf")
+        )
+        XCTAssertEqual(
+            pause,
+            scratch.appendingPathComponent("chapters/chapter-003-pause-002.caf")
+        )
+        // Part names never collide with the Chapter CAF's final name.
+        XCTAssertNotEqual(block, Scratch.chapterCAFURL(in: scratch, index: 3))
+        XCTAssertNotEqual(pause, Scratch.chapterCAFURL(in: scratch, index: 3))
+    }
 }

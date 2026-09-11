@@ -75,4 +75,20 @@ public enum Scratch {
         chaptersDirectory(in: scratch)
             .appendingPathComponent(String(format: "chapter-%03d.caf", index))
     }
+
+    /// The CAF for Chapter `index`'s 1-based Block `block` (per-Block
+    /// synthesis, ticket 05). These are intermediate parts of the Chapter
+    /// CAF, never resume state themselves.
+    public static func blockCAFURL(in scratch: URL, index: Int, block: Int) -> URL {
+        chaptersDirectory(in: scratch)
+            .appendingPathComponent(String(format: "chapter-%03d-block-%03d.caf", index, block))
+    }
+
+    /// The silence CAF between Chapter `index`'s Blocks: the pause
+    /// immediately before 1-based Block `block` (so `block` is 2…N for a
+    /// Chapter with N Blocks).
+    public static func pauseCAFURL(in scratch: URL, index: Int, block: Int) -> URL {
+        chaptersDirectory(in: scratch)
+            .appendingPathComponent(String(format: "chapter-%03d-pause-%03d.caf", index, block))
+    }
 }

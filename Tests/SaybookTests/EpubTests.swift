@@ -17,9 +17,15 @@ final class EpubTests: XCTestCase {
         XCTAssertEqual(book.chapters.count, 1)
         // Title falls back to the document's largest heading (ticket 02).
         XCTAssertEqual(book.chapters[0].title, "Chapter One")
+        // The head <title> is never spoken: the heading appears exactly
+        // once, as its own Block (ticket 05).
         XCTAssertEqual(
-            book.chapters[0].text,
-            "Chapter One Chapter One The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs."
+            book.chapters[0].blocks.map(\.text),
+            [
+                "Chapter One",
+                "The quick brown fox jumps over the lazy dog.",
+                "Pack my box with five dozen liquor jugs.",
+            ]
         )
     }
 
@@ -35,8 +41,14 @@ final class EpubTests: XCTestCase {
         // Title fallback: largest heading → largest heading → filename →
         // filename (the empty chapter has no heading either).
         XCTAssertEqual(book.chapters.map(\.title), ["Chapter One", "Chapter Two", "ch3", "ch4"])
-        // ch4 is an empty document: no readable text.
-        XCTAssertTrue(book.chapters[3].text.isEmpty)
+        // Block structure (ticket 05): heading Block + paragraph Blocks; the
+        // head <title> is never spoken; the empty chapter has no Blocks.
+        XCTAssertEqual(book.chapters.map(\.blocks.count), [2, 4, 4, 0])
+        XCTAssertEqual(book.chapters[0].blocks.map(\.text), [
+            "Chapter One",
+            "The quick brown fox jumps over the lazy dog.",
+        ])
+        XCTAssertTrue(book.chapters[3].blocks.isEmpty)
         XCTAssertTrue(book.chapters.prefix(3).allSatisfy { !$0.text.isEmpty })
         // ch1 is deliberately short (resume/kill tests kill it mid-ch2/ch3);
         // ch2 and ch3 are long so the kill window is wide.
@@ -96,14 +108,14 @@ final class EpubTests: XCTestCase {
         // Titles come from the navigation entries (not the document headings
         // "Heading One"/"Heading Two"); the nav anchor's #fragment is ignored.
         XCTAssertEqual(book.chapters.map(\.title), ["First Voyage", "Second Voyage"])
-        // The spoken text is the chapters' own text only (v1 crude: heading
-        // included; block-level extraction arrives in ticket 05) — and none
-        // of the never-spoken documents' text leaks in.
+        // The spoken text is the chapters' own Blocks only (ticket 05):
+        // heading Block + paragraph Block each, the head <title> never
+        // spoken — and none of the never-spoken documents' text leaks in.
         XCTAssertEqual(
-            book.chapters.map(\.text),
+            book.chapters.map { $0.blocks.map(\.text) },
             [
-                "Heading One Heading One The short first chapter text.",
-                "Heading Two Heading Two The short second chapter text.",
+                ["Heading One", "The short first chapter text."],
+                ["Heading Two", "The short second chapter text."],
             ]
         )
         XCTAssertTrue(book.chapters.allSatisfy { !$0.text.contains("never be spoken") })
@@ -140,6 +152,71 @@ final class EpubTests: XCTestCase {
         XCTAssertEqual(book.author, "")
         XCTAssertEqual(book.cover, .absent)
         XCTAssertEqual(book.chapters.map(\.title), ["Lone Chapter"])
+    }
+
+    // MARK: - Ticket 05: block-level text with natural pauses
+
+    /// The rich fixture: every block-level element, footnotes (EPUB3
+    /// `epub:type` and EPUB2 `class`), an image with alt text and a data URI,
+    /// and links (anchor text, bare-URL anchor text, mailto href).
+    func testLoadBlocksFixtureExtractsBlocks() throws {
+        let scratch = try makeTempDir()
+        let book = try Epub.load(
+            bookAt: fixturesDir.appendingPathComponent("blocks.epub"),
+            scratch: scratch
+        )
+
+        XCTAssertEqual(book.title, "Blocks Book")
+        XCTAssertEqual(book.author, "Blocks Author")
+        XCTAssertEqual(book.chapters.count, 1)
+        // No navigation document: the largest heading is the title.
+        XCTAssertEqual(book.chapters[0].title, "Blocks Chapter")
+
+        // One Block per block-level element, in reading order, with the
+        // per-Block rules applied (entities decoded, whitespace
+        // normalised, footnotes/media/never-spoken subtrees dropped, the
+        // footnote reference marker dropped, the bare-URL anchor text kept
+        // once).
+        XCTAssertEqual(
+            book.chapters[0].blocks.map(\.text),
+            [
+                "Blocks Chapter",
+                "First paragraph with a linked anchor and emphasis.",
+                "Second paragraph ends with a bare-URL link https://example.org/bare and an email.",
+                "Section Heading & Notes",
+                "It’s text after the section heading.",
+                "First list item.",
+                "Second list item with bold text.",
+                "First ordered item.",
+                "A quoted paragraph inside a blockquote.",
+                "line one line two line three",
+                "Caption for the fox picture.",
+                "Paragraph with a footnote that continues after it.",
+                "Final paragraph after all of it.",
+            ]
+        )
+
+        // No skipped content leaks into any Block.
+        let all = book.chapters[0].blocks.map(\.text)
+        let joined = all.joined(separator: "\n")
+        XCTAssertFalse(joined.contains("never be spoken"), joined) // both footnotes
+        XCTAssertFalse(joined.contains("Footnotes"), joined) // the footnote section heading
+        XCTAssertFalse(joined.contains("A picture of a fox"), joined) // the img alt text
+        XCTAssertFalse(joined.contains("iVBORw"), joined) // the image data URI
+        XCTAssertFalse(joined.contains("example.com/anchor"), joined) // a href
+        XCTAssertFalse(joined.contains("mailto:"), joined) // a href
+        XCTAssertFalse(joined.contains("alert"), joined) // the head <script>
+        // The bare-URL anchor text is spoken exactly once; the hrefs are
+        // never spoken.
+        XCTAssertEqual(joined.components(separatedBy: "https://example.org/bare").count - 1, 1, joined)
+
+        // Whitespace: no doubled spaces, no line breaks, no edge padding —
+        // the audible-glitch guard, per Block.
+        for block in all {
+            XCTAssertFalse(block.contains("  "), block)
+            XCTAssertFalse(block.contains("\n"), block)
+            XCTAssertEqual(block, block.trimmingCharacters(in: .whitespaces), block)
+        }
     }
 
     /// An EPUB2 Book (no navigation document): the largest-heading →

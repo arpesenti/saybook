@@ -30,25 +30,47 @@ public struct Book: Sendable {
     }
 }
 
-/// One readable Spine document with its v1-crude text (whole document, one
-/// utterance).
+/// The smallest unit of spoken text within a Chapter (ticket 05): the
+/// whitespace-normalised text of one block-level element (a paragraph,
+/// list item, blockquote, preformatted text, heading, or figcaption). Each
+/// Block is synthesised as one utterance, with an audible pause between
+/// Blocks.
+public struct Block: Sendable, Equatable {
+    /// The Block's spoken text, whitespace-normalised.
+    public let text: String
+
+    public init(text: String) {
+        self.text = text
+    }
+}
+
+/// One readable Spine document: its title and its Blocks in reading order.
+/// Each Block is synthesised as one utterance, with an audible pause
+/// between Blocks (ticket 05).
 public struct Chapter: Sendable {
     /// The document's title: the EPUB3 navigation entry for the document
     /// when present, else the document's largest heading (h1 … h6), else the
     /// filename without extension.
     public let title: String
-    /// All document text, whitespace-normalised.
-    public let text: String
+    /// The document's spoken Blocks in reading order (ticket 05).
+    public let blocks: [Block]
+
+    /// All Block texts joined by single spaces (`""` when the Chapter has
+    /// no Blocks).
+    public var text: String {
+        blocks.map(\.text).joined(separator: " ")
+    }
 }
 
 /// Opens a non-DRM EPUB: unpacks it with the system `ditto` into Scratch and
 /// reads OPF metadata (title/author/language/cover), Spine order, each
-/// Chapter's text, and Chapter titles from the EPUB3 navigation document
-/// when present.
+/// Chapter's Blocks (ticket 05), and Chapter titles from the EPUB3
+/// navigation document when present.
 ///
-/// Parsing is deliberately crude (regex over machine-generated, well-formed
-/// EPUB XML) to stay dependency-free; ticket 05's block-level extraction will
-/// replace the per-Chapter text step.
+/// The OPF is parsed with deliberately crude regexes over machine-generated,
+/// well-formed EPUB XML (staying dependency-free); the content documents are
+/// walked with Foundation's `XMLParser`, which handles the ordered, nested
+/// block structure the regexes would not.
 public enum Epub {
 
     public enum EpubError: Error, Equatable {
@@ -94,7 +116,7 @@ public enum Epub {
             chapters.append(
                 Chapter(
                     title: navTitles[fileURL.standardized.path] ?? chapterTitle(from: text, filename: filename),
-                    text: extractText(from: text)
+                    blocks: extractBlocks(from: text)
                 )
             )
         }
@@ -288,7 +310,137 @@ public enum Epub {
         return .data(data)
     }
 
-    // MARK: - Text extraction (v1 crude: whole document, one utterance)
+    // MARK: - Block extraction (ticket 05)
+
+    /// Block-level element names: each opens a Block.
+    private static let blockElementNames: Set<String> = [
+        "p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "figcaption",
+    ]
+
+    /// Element names whose whole subtree is never spoken: the document head
+    /// (metadata, never content), scripts, styles, and media.
+    private static let neverSpokenElements: Set<String> = [
+        "head", "script", "style", "svg", "canvas", "picture", "video", "audio",
+    ]
+
+    /// XHTML's void elements: no closing tag and no content, so they cannot
+    /// open or end a skip region.
+    private static let voidElements: Set<String> = [
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    ]
+
+    /// `class` tokens marking a footnote or a footnote section (EPUB2/EPUB3
+    /// convention).
+    private static let footnoteClassTokens: Set<String> = ["footnote", "footnotes"]
+
+    /// Whether the element opens a never-spoken subtree: a named
+    /// never-spoken element, or any element marked as a footnote (an
+    /// `epub:type` token of `footnote`, or a `footnote`/`footnotes` class
+    /// token).
+    private static func isNeverSpoken(_ name: String, attributes: [String: String]) -> Bool {
+        if neverSpokenElements.contains(name) { return true }
+        if let type = attributes["epub:type"],
+           type.split(separator: " ").map({ $0.lowercased() }).contains("footnote")
+        { return true }
+        if let classAttribute = attributes["class"],
+           classAttribute.split(separator: " ").map({ $0.lowercased() }).contains(where: footnoteClassTokens.contains)
+        { return true }
+        return false
+    }
+
+    /// The document's Blocks in reading order (ticket 05). A content
+    /// document that is not well-formed XML degrades to its whole-document
+    /// text as a single Block (the v1 behaviour, minus the head): a broken
+    /// document degrades to unstructured speech, never to a silently empty
+    /// chapter. (Footnote subtrees cannot be detected without the parser
+    /// and may be spoken in that degraded path.)
+    static func extractBlocks(from html: String) -> [Block] {
+        if let data = html.data(using: .utf8) {
+            let extractor = BlockExtractor()
+            let parser = XMLParser(data: data)
+            parser.delegate = extractor
+            if parser.parse() {
+                return extractor.finish()
+            }
+        }
+        let text = extractText(from: html)
+        return text.isEmpty ? [] : [Block(text: text)]
+    }
+
+    /// Walks one content document in document order and yields its Blocks
+    /// (ticket 05).
+    ///
+    /// A Block starts at every block-level element; the element's text
+    /// (markup stripped, entities decoded by the parser, whitespace
+    /// normalised) becomes the Block, and a Block that normalises to
+    /// nothing yields none. Text outside any block-level element becomes a
+    /// Block of its own, so no content is dropped. Never-spoken subtrees
+    /// (head, scripts, styles, media, footnotes) are dropped whole.
+    private final class BlockExtractor: NSObject, XMLParserDelegate {
+        private var blocks: [Block] = []
+        /// Text accumulated for the Block (or stray run) currently open.
+        private var current = ""
+        /// The document depth (non-void elements) and the depth at which
+        /// the current never-spoken subtree started (0 = not inside one).
+        private var depth = 0
+        private var skipDepth = 0
+
+        /// The parsed Blocks (call after a successful `XMLParser.parse()`).
+        func finish() -> [Block] {
+            flush()
+            return blocks
+        }
+
+        func parser(
+            _ parser: XMLParser,
+            didStartElement elementName: String,
+            namespaceURI: String?,
+            qualifiedName: String?,
+            attributes: [String: String]
+        ) {
+            let name = elementName.lowercased()
+            guard !Epub.voidElements.contains(name) else { return }
+            if skipDepth > 0 {
+                depth += 1
+                return
+            }
+            depth += 1
+            if Epub.isNeverSpoken(name, attributes: attributes) {
+                skipDepth = depth
+            } else if Epub.blockElementNames.contains(name) {
+                flush()
+            }
+        }
+
+        func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName: String?) {
+            let name = elementName.lowercased()
+            guard !Epub.voidElements.contains(name) else { return }
+            if skipDepth > 0 {
+                depth -= 1
+                // The skipped element itself just closed when the depth
+                // drops below the depth at which the skip started.
+                if depth < skipDepth { skipDepth = 0 }
+                return
+            }
+            depth -= 1
+            if Epub.blockElementNames.contains(name) {
+                flush()
+            }
+        }
+
+        func parser(_ parser: XMLParser, foundCharacters string: String) {
+            guard skipDepth == 0 else { return }
+            current += string
+        }
+
+        private func flush() {
+            let text = Epub.normalize(current)
+            guard !text.isEmpty else { return }
+            blocks.append(Block(text: text))
+            current = ""
+        }
+    }
 
     /// The document's title: the first non-empty largest heading (h1 first,
     /// then h2 … h6), or `filename` when the document has no heading text.
@@ -309,13 +461,18 @@ public enum Epub {
         return filename
     }
 
+    /// The v1 whole-document text (head, scripts and styles dropped):
+    /// the fallback for content documents that are not well-formed XML.
     private static func extractText(from html: String) -> String {
         normalize(decodeEntities(stripMarkup(html)))
     }
 
-    /// Removes scripts, styles, and all tags from XHTML markup.
+    /// Removes the document head, scripts, styles, and all tags from XHTML
+    /// markup (the v1 whole-document text step; Block extraction replaces
+    /// it for well-formed documents).
     private static func stripMarkup(_ html: String) -> String {
         html
+            .replacing(/(?is)<head\b[^>]*>.*?<\/head>/, with: "")
             .replacing(/(?is)<script\b[^>]*>.*?<\/script>/, with: "")
             .replacing(/(?is)<style\b[^>]*>.*?<\/style>/, with: "")
             .replacing(/<[^>]+>/, with: "")

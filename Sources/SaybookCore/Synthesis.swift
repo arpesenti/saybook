@@ -26,6 +26,15 @@ public enum Synthesis {
         AVLinearPCMIsNonInterleaved: false,
     ]
 
+    /// The silence inserted between a chapter's Blocks (ticket 05): ~0.3 s,
+    /// so the output sounds like a narrator breathing between paragraphs.
+    public static let blockPauseDuration: TimeInterval = 0.3
+
+    /// `blockPauseDuration` in PCM frames at the engine's sample rate.
+    public static var blockPauseFrames: Int {
+        Int((blockPauseDuration * sampleRate).rounded())
+    }
+
     public enum SynthesisError: Error, Equatable {
         /// The engine cancelled the utterance or the CAF write failed.
         case failed(String)

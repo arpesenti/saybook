@@ -31,4 +31,16 @@ public enum Assemble {
             }
         }
     }
+
+    /// A silence CAF of exactly `frames` zero samples in the standard
+    /// Synthesis format: the inter-Block pause (ticket 05). Overwrites any
+    /// file already at `output` (a re-run re-renders the whole chapter).
+    public static func writeSilenceCAFFrames(_ frames: Int, to output: URL) throws {
+        try? FileManager.default.removeItem(at: output)
+        let out = try AVAudioFile(forWriting: output, settings: Synthesis.cafSettings)
+        let buffer = AVAudioPCMBuffer(pcmFormat: out.processingFormat, frameCapacity: AVAudioFrameCount(frames))!
+        buffer.frameLength = AVAudioFrameCount(frames)
+        buffer.floatChannelData![0].update(repeating: 0, count: frames)
+        try out.write(from: buffer)
+    }
 }

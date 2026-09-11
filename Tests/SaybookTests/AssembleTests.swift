@@ -72,4 +72,45 @@ final class AssembleTests: XCTestCase {
         let dir = try! makeTempDir()
         XCTAssertThrowsError(try Assemble.concatenate([], to: dir.appendingPathComponent("out.caf")))
     }
+
+    // MARK: - Ticket 05: the inter-Block pause
+
+    /// The pause is ~0.3 s (the ticket's 0.2–0.5 s audible window) at the
+    /// engine's sample rate.
+    func testBlockPauseIsAboutThreeTenthsOfASecond() {
+        let seconds = Double(Synthesis.blockPauseFrames) / Synthesis.sampleRate
+        XCTAssertEqual(seconds, 0.3, accuracy: 0.01, "seconds: \(seconds)")
+        XCTAssertGreaterThanOrEqual(seconds, 0.2)
+        XCTAssertLessThanOrEqual(seconds, 0.5)
+    }
+
+    func testWriteSilenceCAFHasExactFrameCountAndZeroSamples() throws {
+        let dir = try makeTempDir()
+        let out = dir.appendingPathComponent("silence.caf")
+
+        try Assemble.writeSilenceCAFFrames(Synthesis.blockPauseFrames, to: out)
+
+        let file = try open(out)
+        XCTAssertEqual(Int(file.length), Synthesis.blockPauseFrames)
+        XCTAssertEqual(file.processingFormat.sampleRate, 22050)
+        XCTAssertEqual(file.processingFormat.channelCount, 1)
+        XCTAssertEqual(file.processingFormat.commonFormat, .pcmFormatFloat32)
+        let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
+        try file.read(into: buffer)
+        for i in 0..<Int(buffer.frameLength) {
+            XCTAssertEqual(buffer.floatChannelData![0][i], 0, "sample \(i) is not zero")
+        }
+    }
+
+    /// A re-run re-renders the pause: an existing file at the target is
+    /// overwritten, not kept.
+    func testWriteSilenceCAFOverwritesAnExistingFile() throws {
+        let dir = try makeTempDir()
+        let out = dir.appendingPathComponent("silence.caf")
+        try writeCAF(frames: 22_050, at: out) // a stale, longer file
+
+        try Assemble.writeSilenceCAFFrames(1000, to: out)
+
+        XCTAssertEqual(try open(out).length, 1000)
+    }
 }

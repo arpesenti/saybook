@@ -152,7 +152,7 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
     for (index, chapter) in book.chapters.enumerated() {
         let number = index + 1
 
-        guard !chapter.text.isEmpty else {
+        guard !chapter.blocks.isEmpty else {
             // Empty Chapter: no audio, no Chapter Marker.
             skipped += 1
             report("– \(number)/\(book.chapters.count) · \(chapter.title) · (no text)")
@@ -165,10 +165,13 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
             frameCount = try cafFrameCount(at: cafURL)
             report("⏭ \(number)/\(book.chapters.count) · \(chapter.title) · \(formatDuration(Double(frameCount) / Synthesis.sampleRate)) (cached)")
         } else {
-            let utterance = AVSpeechUtterance(string: chapter.text)
-            utterance.voice = speechVoice
-            utterance.rate = Float(rate)
-            try Synthesis.render(utterance: utterance, to: cafURL)
+            // One utterance per Block, separated by the inter-Block pause
+            // (ticket 05): the Chapter CAF is the atomic concatenation of
+            // the per-Block CAFs and the silences between them.
+            let parts = try renderBlocks(
+                chapter.blocks, chapterNumber: number, voice: speechVoice, rate: rate, in: scratch
+            )
+            try concatenateAtomic(parts, to: cafURL)
             frameCount = try cafFrameCount(at: cafURL)
             report("✓ \(number)/\(book.chapters.count) · \(chapter.title) · \(formatDuration(Double(frameCount) / Synthesis.sampleRate))")
         }
@@ -179,6 +182,54 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
         throw SaybookError(message: "No readable chapters in \(book.title)")
     }
     return (renders, skipped)
+}
+
+/// Concatenates `parts` into `output` atomically (render to a `.partial`
+/// sibling, rename on success), the same publish discipline as
+/// `Synthesis.render`: a killed run never leaves a partial at the final
+/// name, which is what the per-Chapter resume keys on.
+private func concatenateAtomic(_ parts: [URL], to output: URL) throws {
+    let partial = output.deletingPathExtension().appendingPathExtension("caf.partial")
+    try? FileManager.default.removeItem(at: partial)
+    do {
+        try Assemble.concatenate(parts, to: partial)
+        // A killed run (before publishing was atomic) may have left a
+        // partial at the final name: the fresh render replaces it.
+        try? FileManager.default.removeItem(at: output)
+        try FileManager.default.moveItem(at: partial, to: output)
+    } catch {
+        try? FileManager.default.removeItem(at: partial)
+        throw error
+    }
+}
+
+/// Synthesises a Chapter's Blocks (ticket 05): one utterance per Block, a
+/// silence CAF between consecutive Blocks. Returns the part CAFs in
+/// Chapter order (`[block 1, pause, block 2, pause, …, block N]`).
+@MainActor
+private func renderBlocks(
+    _ blocks: [Block], chapterNumber: Int, voice: AVSpeechSynthesisVoice, rate: Double, in scratch: URL
+) throws -> [URL] {
+    var parts: [URL] = []
+    for (offset, block) in blocks.enumerated() {
+        let blockNumber = offset + 1
+        if offset > 0 {
+            let pauseURL = Scratch.pauseCAFURL(in: scratch, index: chapterNumber, block: blockNumber)
+            try Assemble.writeSilenceCAFFrames(Synthesis.blockPauseFrames, to: pauseURL)
+            parts.append(pauseURL)
+        }
+        let cafURL = Scratch.blockCAFURL(in: scratch, index: chapterNumber, block: blockNumber)
+        // A killed run may have left a completed part from the previous
+        // attempt (same Voice/Rate: the options marker guards that): this
+        // re-render overwrites it, so the atomic publish below can rename.
+        try? FileManager.default.removeItem(at: cafURL)
+        let utterance = AVSpeechUtterance(string: block.text)
+        utterance.voice = voice
+        utterance.rate = Float(rate)
+        try Synthesis.render(utterance: utterance, to: cafURL)
+        parts.append(cafURL)
+    }
+    return parts
 }
 
 /// The exact PCM frame count of a CAF (1 frame per sample, mono).

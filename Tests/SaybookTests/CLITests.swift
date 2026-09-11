@@ -60,13 +60,14 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(String(data: data[12..<24], encoding: .isoLatin1), "m4b mp42isom")
 
         // The output decodes as 22.05 kHz mono AAC. Duration is within ±10% of
-        // the expected for the fixture's 21 words at the default voice (rate
-        // 0.5): baseline measured at 7.0 s on macOS 26 (ticket 01 comment).
+        // the expected for the fixture's 19 words plus the two 0.3 s inter-Block
+        // pauses at the default voice (rate 0.5): baseline measured at 6.6 s on
+        // macOS 26 (ticket 05; 7.0 s before Blocks, ticket 01).
         let file = try AVAudioFile(forReading: expected)
         XCTAssertEqual(file.processingFormat.sampleRate, 22050)
         XCTAssertEqual(file.processingFormat.channelCount, 1)
         let duration = Double(file.length) / 22050
-        XCTAssertEqual(duration, 7.0, accuracy: 0.7, "duration: \(duration)")
+        XCTAssertEqual(duration, 6.6, accuracy: 0.7, "duration: \(duration)")
     }
 
     func testExistingOutputIsRefused() throws {
@@ -156,12 +157,61 @@ final class CLITests: XCTestCase {
             XCTFail("offsets must be strictly increasing: \(offsets)")
         }
 
-        // Total duration ≈ 13 + 184 + 248 words at the default voice
-        // (measured ≈ 139 s on macOS 26; the repeated sentences in ch2/ch3
-        // read slightly faster than the 0.33 s/word single-chapter baseline).
+        // Total duration ≈ 11 + 182 + 248 words plus the inter-Block pauses
+        // at the default voice (measured ≈ 139 s on macOS 26; the repeated
+        // sentences in ch2/ch3 read slightly faster than the 0.33 s/word
+        // single-chapter baseline).
         let file = try AVAudioFile(forReading: expected)
         let duration = Double(file.length) / Synthesis.sampleRate
         XCTAssertEqual(duration, 139, accuracy: 14, "duration: \(duration)")
+    }
+
+    func testBlocksAreSeparatedByAudiblePauses() throws {
+        // Ticket 05: the single-chapter fixture has 3 Blocks (heading + two
+        // paragraphs), so the output carries exactly two inter-Block pauses
+        // — each 0.3 s of digital silence plus the engine's own edge silence,
+        // a near-silent run of 0.2–0.5 s (the ticket's audible window) inside
+        // the audio. Natural inter-word pauses are far shorter (<0.1 s) and
+        // never touch a whole 0.2 s window run.
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        let result = try run([input.path])
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+
+        let raw = dir.appendingPathComponent("raw.f32")
+        try decodeToFloatPCM(dir.appendingPathComponent("book.m4b"), at: raw)
+        let pcm = try Data(contentsOf: raw)
+
+        // 10 ms windows; a window below the speech RMS floor counts as
+        // silent. Maximal silent runs bounded by speech on both sides (not
+        // touching the file edges) and inside the ticket's 0.2–0.5 s audible
+        // window (with headroom for the engine's edge silence around the
+        // injected 0.3 s) are the inter-Block pauses.
+        let sampleRate = 22_050
+        let window = sampleRate / 100
+        let totalFrames = pcm.count / 4
+        var runs: [TimeInterval] = []
+        var offset = 0
+        while offset + window <= totalFrames {
+            if rms(of: pcm, from: offset, count: window) < 0.01 {
+                var end = offset
+                while end + window <= totalFrames, rms(of: pcm, from: end, count: window) < 0.01 {
+                    end += window
+                }
+                if offset > 0, end < totalFrames,
+                   end - offset >= sampleRate / 5, end - offset <= sampleRate  // 0.2–1.0 s
+                {
+                    runs.append(TimeInterval(end - offset) / Double(sampleRate))
+                }
+                offset = end
+            } else {
+                offset += window
+            }
+        }
+        XCTAssertEqual(runs.count, 2, "two inter-Block pauses, got: \(runs.map { String(format: "%.2f", $0) })")
     }
 
     func testResumeSkipsExistingChapters() throws {
@@ -320,10 +370,11 @@ final class CLITests: XCTestCase {
         let scratch = try Scratch.directory(for: input)
         func cafURL(_ n: Int) -> URL { Scratch.chapterCAFURL(in: scratch, index: n) }
 
-        // Run, then kill mid-way: chapter 1 (13 words ≈ 4 s of audio) is
-        // done well before the kill; chapter 3 (248 words ≈ 83 s of audio)
-        // keeps the kill window open. Whatever the kill lands on, the
-        // completed chapters' CAFs must survive and be skipped on the re-run.
+        // Run, then kill mid-way: chapter 1 (11 words ≈ 3.5 s of audio plus
+        // one 0.3 s inter-Block pause) is done well before the kill;
+        // chapter 3 (248 words ≈ 83 s of audio) keeps the kill window open.
+        // Whatever the kill lands on, the completed chapters' CAFs must
+        // survive and be skipped on the re-run.
         let process = Process()
         process.executableURL = binary
         process.arguments = [input.path]
