@@ -73,23 +73,39 @@ public enum ChapterMarkers {
         return Data(out)
     }
 
-    /// Appends a `udta` box containing `box` inside `moov`, growing `moov`'s
-    /// size. `moov` must be the last top-level box (true of
-    /// AVAssetExportSession output); every other byte is preserved.
+    /// Appends `box` at the end of `moov`'s last `udta`, growing both `udta`
+    /// and `moov` to cover it — or creates a fresh `udta` when `moov` carries
+    /// none. Reusing the existing `udta` (AVAssetExportSession writes one
+    /// with encoder metadata) follows the single-`udta`-per-`moov`
+    /// convention of Apple's own M4Bs: a reader that consults only the first
+    /// `udta` still finds the `chpl` box. `moov` must be the last top-level
+    /// box (true of AVAssetExportSession output); every other byte is
+    /// preserved, so the media data the `stco` offsets point at does not
+    /// shift.
     public static func insert(box: Data, into data: Data) throws -> Data {
-        let boxes = topLevelBoxes(in: data)
-        guard let moov = boxes.last, moov.type == "moov",
-              moov.range.upperBound == data.count
-        else {
-            throw moovIsAbsent(boxes) ? ChapterMarkerError.noMoovBox : ChapterMarkerError.moovNotLast
+        let top = topLevelBoxes(in: data)
+        guard let moov = top.last, moov.type == "moov", moov.range.upperBound == data.count else {
+            throw moovIsAbsent(top) ? ChapterMarkerError.noMoovBox : ChapterMarkerError.moovNotLast
         }
 
-        let udtaSize = 8 + box.count
-        let udta = Data(u32(UInt32(udtaSize)) + Array("udta".utf8)) + box
-        var out = [UInt8](data[data.startIndex..<(data.startIndex + moov.range.lowerBound)])
-        out += u32(UInt32(moov.range.count + udtaSize)) // grown moov size
-        out += [UInt8](data[(data.startIndex + moov.range.lowerBound + 4)..<(data.startIndex + moov.range.upperBound)])
-        out += [UInt8](udta)
+        var out = [UInt8](data)
+        let boxBytes = [UInt8](box)
+        let moovChildren = topLevelBoxes(in: data, moov.range)
+
+        if let udta = moovChildren.last(where: { $0.type == "udta" }),
+           udta.range.upperBound == moov.range.upperBound {
+            // Extend the last udta (and moov) to cover the appended box.
+            setU32(&out, at: udta.range.lowerBound, UInt32(udta.range.count + boxBytes.count))
+            setU32(&out, at: moov.range.lowerBound, UInt32(moov.range.count + boxBytes.count))
+            out += boxBytes
+        } else {
+            // No trailing udta: append a new one as moov's last child.
+            var udtaBytes = u32(UInt32(8 + boxBytes.count))
+            udtaBytes += Array("udta".utf8)
+            udtaBytes += boxBytes
+            setU32(&out, at: moov.range.lowerBound, UInt32(moov.range.count + udtaBytes.count))
+            out += udtaBytes
+        }
         return Data(out)
     }
 
@@ -192,5 +208,11 @@ public enum ChapterMarkers {
 
     private static func u64(_ v: UInt64) -> [UInt8] {
         withUnsafeBytes(of: v.bigEndian) { Array($0) }
+    }
+
+    /// Overwrites the 4 bytes at `offset` with `value` (big-endian).
+    private static func setU32(_ bytes: inout [UInt8], at offset: Int, _ value: UInt32) {
+        let be = u32(value)
+        for k in 0..<4 { bytes[offset + k] = be[k] }
     }
 }

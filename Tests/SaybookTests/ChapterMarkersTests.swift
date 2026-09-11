@@ -40,7 +40,7 @@ final class ChapterMarkersTests: XCTestCase {
         XCTAssertEqual(box.count, 8 + contentLength)
 
         let b = [UInt8](box)
-        XCTAssertEqual(u32b(b, 0), UInt32(box.count), "box size field")
+        XCTAssertEqual(bigEndianU32(b, 0), UInt32(box.count), "box size field")
         XCTAssertEqual(String(bytes: b[4..<8], encoding: .isoLatin1), "chpl")
         XCTAssertEqual(b[8], 0x01, "version 1")
         XCTAssertEqual(Array(b[9..<12]), [0, 0, 0], "flags")
@@ -49,9 +49,9 @@ final class ChapterMarkersTests: XCTestCase {
 
         // Chapter 2 starts at 22 050 samples of 22 050 Hz = exactly 1 s =
         // 10 000 000 units of 100 ns.
-        XCTAssertEqual(u64b(b, 17), 0, "chapter 1 offset")
-        XCTAssertEqual(u64b(b, 17 + 9 + titleBytes[0]), 10_000_000, "chapter 2 offset in 100 ns")
-        XCTAssertEqual(u64b(b, 17 + (9 + titleBytes[0]) + (9 + titleBytes[1])), 3 * 10_000_000, "chapter 3 offset")
+        XCTAssertEqual(bigEndianU64(b, 17), 0, "chapter 1 offset")
+        XCTAssertEqual(bigEndianU64(b, 17 + 9 + titleBytes[0]), 10_000_000, "chapter 2 offset in 100 ns")
+        XCTAssertEqual(bigEndianU64(b, 17 + (9 + titleBytes[0]) + (9 + titleBytes[1])), 3 * 10_000_000, "chapter 3 offset")
 
         // Titles are raw UTF-8, one length byte each, no padding or null.
         let lenPos = 17 + 8
@@ -95,6 +95,47 @@ final class ChapterMarkersTests: XCTestCase {
 
         // Every byte before moov is preserved.
         XCTAssertEqual(Array(out[..<moovOff]), Array(data[..<moovOff]))
+    }
+
+    func testInsertMergesIntoExistingUdta() throws {
+        // A moov that already ends in a udta (AVAssetExportSession writes
+        // one with encoder metadata) must absorb the chpl box into THAT
+        // udta — not grow a second udta (single-udta-per-moov convention of
+        // Apple's own M4Bs).
+        let ftyp: [UInt8] = u32Array(16) + Array("ftyp".utf8) + Array("M4A isom".utf8)
+        let mdat: [UInt8] = u32Array(12) + Array("mdat".utf8) + [1, 2, 3, 4]
+        let mvhd: [UInt8] = u32Array(16) + Array("mvhd".utf8) + [UInt8](repeating: 0, count: 8)
+        let encoderMeta: [UInt8] = u32Array(12) + Array("meta".utf8) + [UInt8](repeating: 5, count: 4)
+        let udta: [UInt8] = u32Array(UInt32(8 + encoderMeta.count)) + Array("udta".utf8) + encoderMeta
+        let moov: [UInt8] = u32Array(UInt32(8 + mvhd.count + udta.count)) + Array("moov".utf8) + mvhd + udta
+        let data = Data(ftyp + mdat + moov)
+
+        let box = ChapterMarkers.box(markers: markers, trackTimescale: 22_050)
+        let out = try ChapterMarkers.insert(box: box, into: data)
+
+        // Top-level unchanged: ftyp, mdat, moov — grown by exactly the chpl.
+        let boxes = topLevelBoxes(out)
+        XCTAssertEqual(boxes.map(\.type), ["ftyp", "mdat", "moov"])
+        let moovOff = boxes[2].offset
+        XCTAssertEqual(boxes[2].size, 8 + mvhd.count + udta.count + box.count, "moov grew by exactly the chpl")
+
+        // moov children: mvhd, udta — one udta, at its original offset.
+        let moovChildren = topLevelBoxes(out, from: moovOff + 8, to: moovOff + boxes[2].size)
+        XCTAssertEqual(moovChildren.map(\.type), ["mvhd", "udta"], "no second udta")
+        let udtaOff = moovChildren[1].offset
+        XCTAssertEqual(udtaOff, ftyp.count + mdat.count + 8 + mvhd.count, "the same udta, in place")
+        XCTAssertEqual(moovChildren[1].size, 8 + encoderMeta.count + box.count, "udta grew by the chpl")
+
+        // The udta's children: the encoder box, then chpl.
+        let udtaChildren = topLevelBoxes(out, from: udtaOff + 8, to: udtaOff + moovChildren[1].size)
+        XCTAssertEqual(udtaChildren.map(\.type), ["meta", "chpl"])
+        XCTAssertEqual([UInt8](out[udtaChildren[1].offset..<udtaChildren[1].offset + box.count]), [UInt8](box))
+
+        // Every byte except the two size fields I grew is preserved:
+        // everything before moov, and the mvhd region between moov's header
+        // and the udta.
+        XCTAssertEqual(Array(out[..<moovOff]), Array(data[..<moovOff]))
+        XCTAssertEqual(Array(out[(moovOff + 8)..<udtaOff]), Array(data[(moovOff + 8)..<udtaOff]))
     }
 
     func testInsertThrowsWhenMoovIsMissing() {
@@ -213,11 +254,11 @@ final class ChapterMarkersTests: XCTestCase {
 func u32Array(_ v: UInt32) -> [UInt8] { withUnsafeBytes(of: v.bigEndian) { Array($0) } }
 func u64Array(_ v: UInt64) -> [UInt8] { withUnsafeBytes(of: v.bigEndian) { Array($0) } }
 
-func u32b(_ b: [UInt8], _ off: Int) -> UInt32 {
+func bigEndianU32(_ b: [UInt8], _ off: Int) -> UInt32 {
     (UInt32(b[off]) << 24) | (UInt32(b[off + 1]) << 16) | (UInt32(b[off + 2]) << 8) | UInt32(b[off + 3])
 }
 
-func u64b(_ b: [UInt8], _ off: Int) -> UInt64 {
+func bigEndianU64(_ b: [UInt8], _ off: Int) -> UInt64 {
     var v: UInt64 = 0
     for k in 0..<8 { v = (v << 8) | UInt64(b[off + k]) }
     return v

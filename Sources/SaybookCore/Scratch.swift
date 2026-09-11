@@ -22,4 +22,16 @@ public enum Scratch {
         let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
         return URL.temporaryDirectory.appendingPathComponent("saybook-\(hex)")
     }
+
+    /// The directory inside Scratch holding the per-Chapter CAFs.
+    public static func chaptersDirectory(in scratch: URL) -> URL {
+        scratch.appendingPathComponent("chapters")
+    }
+
+    /// The CAF for the 1-based Chapter `index`. Existence is the resume
+    /// state: a CAF at its final name is a finished Chapter.
+    public static func chapterCAFURL(in scratch: URL, index: Int) -> URL {
+        chaptersDirectory(in: scratch)
+            .appendingPathComponent(String(format: "chapter-%03d.caf", index))
+    }
 }

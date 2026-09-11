@@ -23,18 +23,21 @@ final class EpubTests: XCTestCase {
         )
     }
 
-    func testLoadThreeChapterFixtureTitles() throws {
+    func testLoadMultiChapterFixtureTitles() throws {
         let scratch = try makeTempDir()
         let book = try Epub.load(
-            bookAt: fixturesDir.appendingPathComponent("three-chapter.epub"),
+            bookAt: fixturesDir.appendingPathComponent("multi-chapter.epub"),
             scratch: scratch
         )
 
-        XCTAssertEqual(book.title, "Three Chapter Book")
-        XCTAssertEqual(book.chapters.count, 3)
-        // Title fallback: largest heading → largest heading → filename.
-        XCTAssertEqual(book.chapters.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
-        XCTAssertTrue(book.chapters.allSatisfy { !$0.text.isEmpty })
+        XCTAssertEqual(book.title, "Multi Chapter Book")
+        XCTAssertEqual(book.chapters.count, 4)
+        // Title fallback: largest heading → largest heading → filename →
+        // filename (the empty chapter has no heading either).
+        XCTAssertEqual(book.chapters.map(\.title), ["Chapter One", "Chapter Two", "ch3", "ch4"])
+        // ch4 is an empty document: no readable text.
+        XCTAssertTrue(book.chapters[3].text.isEmpty)
+        XCTAssertTrue(book.chapters.prefix(3).allSatisfy { !$0.text.isEmpty })
         // ch1 is deliberately short (resume/kill tests kill it mid-ch2/ch3);
         // ch2 and ch3 are long so the kill window is wide.
         XCTAssertGreaterThan(book.chapters[1].text.split(separator: " ").count, 150)

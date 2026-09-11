@@ -92,8 +92,9 @@ private struct ChapterRender {
 /// already exists in Scratch is skipped (resume: existence = state).
 @MainActor
 private func synthesizeChapters(of book: Book, in scratch: URL) throws -> (renders: [ChapterRender], skipped: Int) {
-    let chaptersDir = scratch.appendingPathComponent("chapters")
-    try FileManager.default.createDirectory(at: chaptersDir, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+        at: Scratch.chaptersDirectory(in: scratch), withIntermediateDirectories: true
+    )
 
     var renders: [ChapterRender] = []
     var skipped = 0
@@ -107,7 +108,7 @@ private func synthesizeChapters(of book: Book, in scratch: URL) throws -> (rende
             continue
         }
 
-        let cafURL = chaptersDir.appendingPathComponent(String(format: "chapter-%03d.caf", number))
+        let cafURL = Scratch.chapterCAFURL(in: scratch, index: number)
         let frameCount: Int
         if FileManager.default.fileExists(atPath: cafURL.path) {
             frameCount = try cafFrameCount(at: cafURL)
@@ -143,7 +144,10 @@ private func formatDuration(_ seconds: TimeInterval) -> String {
 /// The final summary line: chapter count, skipped count, total duration,
 /// output size, and output path.
 private func summaryLine(chapters: Int, skipped: Int, duration: TimeInterval, sizeInBytes: Int, path: String) -> String {
-    "Chapters: \(chapters) · Skipped: \(skipped) · Duration: \(formatDuration(duration)) · Size: \(formatSize(sizeInBytes)) · Path: \(path)"
+    // Empty Chapters are the only kind skipped: annotate the count so the
+    // summary line explains itself (spec: "reported skipped (no text)").
+    let skippedText = skipped == 0 ? "0" : "\(skipped) (no text)"
+    return "Chapters: \(chapters) · Skipped: \(skippedText) · Duration: \(formatDuration(duration)) · Size: \(formatSize(sizeInBytes)) · Path: \(path)"
 }
 
 /// KB/MB/GB with one decimal (1024-based).
