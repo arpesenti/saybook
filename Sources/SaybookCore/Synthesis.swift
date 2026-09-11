@@ -50,12 +50,14 @@ public enum Synthesis {
     /// final name, which is what resume keys on.
     @MainActor
     public static func render(utterance: AVSpeechUtterance, to cafURL: URL) throws {
-        let partial = cafURL.deletingPathExtension().appendingPathExtension("caf.partial")
+        let partial = AtomicPublish.partial(for: cafURL)
+        // A killed run may have left a stale partial at this name: replace
+        // it rather than render into it.
         try? FileManager.default.removeItem(at: partial)
         let collector = UtteranceCollector()
         do {
             // The AVAudioFile is released (closing the underlying file) at
-            // the end of this scope, before the atomic rename.
+            // the end of this scope, before the atomic publish.
             let file = try AVAudioFile(forWriting: partial, settings: cafSettings)
 
             let synthesizer = AVSpeechSynthesizer()
@@ -80,9 +82,8 @@ public enum Synthesis {
             throw SynthesisError.failed("\(error)")
         }
         do {
-            try FileManager.default.moveItem(at: partial, to: cafURL)
+            try AtomicPublish.publish(partial: partial, to: cafURL)
         } catch {
-            try? FileManager.default.removeItem(at: partial)
             throw SynthesisError.failed("\(error)")
         }
     }

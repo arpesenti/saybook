@@ -110,7 +110,7 @@ final class ScratchTests: XCTestCase {
             pause,
             scratch.appendingPathComponent("chapters/chapter-003-pause-002.caf")
         )
-        // Part names never collide with the Chapter CAF's final name.
+        // Segment names never collide with the Chapter CAF's final name.
         XCTAssertNotEqual(block, Scratch.chapterCAFURL(in: scratch, index: 3))
         XCTAssertNotEqual(pause, Scratch.chapterCAFURL(in: scratch, index: 3))
     }

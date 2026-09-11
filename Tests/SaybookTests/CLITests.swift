@@ -187,9 +187,11 @@ final class CLITests: XCTestCase {
 
         // 10 ms windows; a window below the speech RMS floor counts as
         // silent. Maximal silent runs bounded by speech on both sides (not
-        // touching the file edges) and inside the ticket's 0.2–0.5 s audible
-        // window (with headroom for the engine's edge silence around the
-        // injected 0.3 s) are the inter-Block pauses.
+        // touching the file edges) and inside the 0.2–0.8 s window are the
+        // inter-Block pauses: the injected 0.3 s (the ticket's 0.2–0.5 s
+        // audible window) plus the engine's edge silence — measured 0.36–
+        // 0.46 s on macOS 26, so 0.8 s is headroom, not a widening of the
+        // spec window. Natural inter-word pauses are far shorter (<0.1 s).
         let sampleRate = 22_050
         let window = sampleRate / 100
         let totalFrames = pcm.count / 4
@@ -202,7 +204,7 @@ final class CLITests: XCTestCase {
                     end += window
                 }
                 if offset > 0, end < totalFrames,
-                   end - offset >= sampleRate / 5, end - offset <= sampleRate  // 0.2–1.0 s
+                   end - offset >= sampleRate / 5, end - offset <= sampleRate * 4 / 5  // 0.2–0.8 s
                 {
                     runs.append(TimeInterval(end - offset) / Double(sampleRate))
                 }

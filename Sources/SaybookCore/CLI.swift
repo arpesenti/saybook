@@ -168,10 +168,13 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
             // One utterance per Block, separated by the inter-Block pause
             // (ticket 05): the Chapter CAF is the atomic concatenation of
             // the per-Block CAFs and the silences between them.
-            let parts = try renderBlocks(
+            let segments = try renderBlocks(
                 chapter.blocks, chapterNumber: number, voice: speechVoice, rate: rate, in: scratch
             )
-            try concatenateAtomic(parts, to: cafURL)
+            let partial = AtomicPublish.partial(for: cafURL)
+            try AtomicPublish.produce(partial: partial, to: cafURL) {
+                try Assemble.concatenate(segments, to: partial)
+            }
             frameCount = try cafFrameCount(at: cafURL)
             report("✓ \(number)/\(book.chapters.count) · \(chapter.title) · \(formatDuration(Double(frameCount) / Synthesis.sampleRate))")
         }
@@ -184,52 +187,32 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
     return (renders, skipped)
 }
 
-/// Concatenates `parts` into `output` atomically (render to a `.partial`
-/// sibling, rename on success), the same publish discipline as
-/// `Synthesis.render`: a killed run never leaves a partial at the final
-/// name, which is what the per-Chapter resume keys on.
-private func concatenateAtomic(_ parts: [URL], to output: URL) throws {
-    let partial = output.deletingPathExtension().appendingPathExtension("caf.partial")
-    try? FileManager.default.removeItem(at: partial)
-    do {
-        try Assemble.concatenate(parts, to: partial)
-        // A killed run (before publishing was atomic) may have left a
-        // partial at the final name: the fresh render replaces it.
-        try? FileManager.default.removeItem(at: output)
-        try FileManager.default.moveItem(at: partial, to: output)
-    } catch {
-        try? FileManager.default.removeItem(at: partial)
-        throw error
-    }
-}
-
 /// Synthesises a Chapter's Blocks (ticket 05): one utterance per Block, a
-/// silence CAF between consecutive Blocks. Returns the part CAFs in
+/// silence CAF between consecutive Blocks. Returns the segment CAFs in
 /// Chapter order (`[block 1, pause, block 2, pause, …, block N]`).
 @MainActor
 private func renderBlocks(
     _ blocks: [Block], chapterNumber: Int, voice: AVSpeechSynthesisVoice, rate: Double, in scratch: URL
 ) throws -> [URL] {
-    var parts: [URL] = []
+    var segments: [URL] = []
     for (offset, block) in blocks.enumerated() {
         let blockNumber = offset + 1
         if offset > 0 {
             let pauseURL = Scratch.pauseCAFURL(in: scratch, index: chapterNumber, block: blockNumber)
             try Assemble.writeSilenceCAFFrames(Synthesis.blockPauseFrames, to: pauseURL)
-            parts.append(pauseURL)
+            segments.append(pauseURL)
         }
         let cafURL = Scratch.blockCAFURL(in: scratch, index: chapterNumber, block: blockNumber)
-        // A killed run may have left a completed part from the previous
-        // attempt (same Voice/Rate: the options marker guards that): this
-        // re-render overwrites it, so the atomic publish below can rename.
-        try? FileManager.default.removeItem(at: cafURL)
+        // A killed run may have left a stale file at the final name (same
+        // Voice/Rate: the options marker guards that): AtomicPublish
+        // replaces it before the rename.
         let utterance = AVSpeechUtterance(string: block.text)
         utterance.voice = voice
         utterance.rate = Float(rate)
         try Synthesis.render(utterance: utterance, to: cafURL)
-        parts.append(cafURL)
+        segments.append(cafURL)
     }
-    return parts
+    return segments
 }
 
 /// The exact PCM frame count of a CAF (1 frame per sample, mono).
