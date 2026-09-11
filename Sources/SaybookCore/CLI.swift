@@ -20,19 +20,42 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
         report("error: \(error)")
         return 2
     }
+
+    // SIGINT stops the run after the current unit of work (ticket 06):
+    // the handler only sets a flag; the run checks it at unit boundaries
+    // and exits cleanly with Scratch kept (resume = re-run).
+    Signals.install()
+
     let input = URL(fileURLWithPath: options.inputPath)
-    var isDirectory: ObjCBool = false
-    guard FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectory),
-          !isDirectory.boolValue
-    else {
+    guard FileManager.default.fileExists(atPath: input.path), !isDirectory(input.path) else {
         report("error: No such file: \(input.path)")
         return 1
     }
 
-    let output = input.deletingPathExtension().appendingPathExtension("m4b")
-    guard !FileManager.default.fileExists(atPath: output.path) else {
-        report("error: Output already exists: \(output.path)")
-        return 1
+    // The output path: `-o` when given, else `<InputBase>.m4b` beside the
+    // input. The `-o` parent directory must exist: a fast user error before
+    // any work starts.
+    let output: URL
+    if let relative = options.outputPath {
+        output = URL(fileURLWithPath: relative)
+        guard isDirectory(output.deletingLastPathComponent().path) else {
+            report("error: Output directory does not exist: \(output.deletingLastPathComponent().path)")
+            return 1
+        }
+    } else {
+        output = input.deletingPathExtension().appendingPathExtension("m4b")
+    }
+    if FileManager.default.fileExists(atPath: output.path) {
+        if isDirectory(output.path) {
+            // The tool replaces files, never directories (with or without
+            // `--force`).
+            report("error: Output path is a directory: \(output.path)")
+            return 1
+        }
+        guard options.force else {
+            report("error: Output already exists: \(output.path)")
+            return 1
+        }
     }
 
     // An explicit `--voice` must exist before any work starts: a fast
@@ -76,6 +99,10 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
 
         let (renders, skipped) = try synthesizeChapters(of: book, voice: voice, rate: options.rate, in: scratchDir)
 
+        // A SIGINT during the final fast step: the chapters are done, so
+        // report them as such.
+        try ensureNotInterrupted(completed: book.chapters.count, total: book.chapters.count)
+
         let combined = scratchDir.appendingPathComponent("book.caf")
         try Assemble.concatenate(renders.map(\.cafURL), to: combined)
 
@@ -99,7 +126,13 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
         let offsets = ChapterMarkers.startOffsets(frameCounts: renders.map(\.frameCount))
         let markers = zip(offsets, renders).map { ChapterMarker(sampleOffset: $0, title: $1.title) }
         data = try ChapterMarkers.insertChpl(markers: markers, trackTimescale: Synthesis.trackTimescale, into: data)
-        try data.write(to: output)
+        // Publish the output atomically (ticket 06): with `--force` the
+        // output file is replaced, so a killed final write must not leave a
+        // half-written file at the output path.
+        let partial = output.appendingPathExtension("partial")
+        try AtomicPublish.produce(partial: partial, to: output) {
+            try data.write(to: partial)
+        }
 
         let totalSeconds = Double(renders.reduce(0) { $0 + $1.frameCount }) / Synthesis.sampleRate
         report(summaryLine(
@@ -110,10 +143,26 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
             path: output.path
         ))
 
-        try FileManager.default.removeItem(at: scratchDir)
+        if options.keepScratch {
+            report("note: scratch kept: \(scratchDir.path)")
+        } else {
+            try FileManager.default.removeItem(at: scratchDir)
+        }
         return 0
+    } catch let error as RunInterrupted {
+        report("note: interrupted — stopped after \(error.completed) of \(error.total) chapters")
+        if let scratch {
+            report("note: scratch kept for resume: \(scratch.path)")
+        }
+        return 1
     } catch Epub.EpubError.notAValidEpub {
         report("error: Not a valid EPUB: \(input.path)")
+        return 1
+    } catch Epub.EpubError.noReadableChapters {
+        report("error: No readable chapters in \(input.path)")
+        return 1
+    } catch let Epub.EpubError.drmEncrypted(uri) {
+        report("error: DRM-protected EPUB: \"\(uri)\" is encrypted (only non-DRM books are supported)")
         return 1
     } catch let error as SaybookError {
         report("error: \(error.message)")
@@ -126,6 +175,20 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
 }
 
 // MARK: - Per-chapter synthesis
+
+/// The run was stopped by SIGINT after the current unit of work (ticket
+/// 06): Scratch is kept, and the run exits 1 with its progress so far.
+private struct RunInterrupted: Error {
+    /// The Chapters completed when the run stopped.
+    let completed: Int
+    /// The Book's total Chapter count.
+    let total: Int
+}
+
+/// Throws `RunInterrupted` when SIGINT arrived since the last check.
+private func ensureNotInterrupted(completed: Int, total: Int) throws {
+    if Signals.interrupted { throw RunInterrupted(completed: completed, total: total) }
+}
 
 /// A synthesised (or cached) Chapter's audio: its CAF plus the exact PCM
 /// frame count the Chapter Marker offsets are computed from.
@@ -151,6 +214,9 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
     var skipped = 0
     for (index, chapter) in book.chapters.enumerated() {
         let number = index + 1
+        // A SIGINT between Chapters stops before any more work: the
+        // chapters completed so far are resume state.
+        try ensureNotInterrupted(completed: number - 1, total: book.chapters.count)
 
         guard !chapter.blocks.isEmpty else {
             // Empty Chapter: no audio, no Chapter Marker.
@@ -169,7 +235,12 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
             // (ticket 05): the Chapter CAF is the atomic concatenation of
             // the per-Block CAFs and the silences between them.
             let segments = try renderBlocks(
-                chapter.blocks, chapterNumber: number, voice: speechVoice, rate: rate, in: scratch
+                chapter.blocks,
+                chapterNumber: number,
+                total: book.chapters.count,
+                voice: speechVoice,
+                rate: rate,
+                in: scratch
             )
             let partial = AtomicPublish.partial(for: cafURL)
             try AtomicPublish.produce(partial: partial, to: cafURL) {
@@ -189,10 +260,12 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
 
 /// Synthesises a Chapter's Blocks (ticket 05): one utterance per Block, a
 /// silence CAF between consecutive Blocks. Returns the segment CAFs in
-/// Chapter order (`[block 1, pause, block 2, pause, …, block N]`).
+/// Chapter order (`[block 1, pause, block 2, pause, …, block N]`). A SIGINT
+/// stops the run after the current Block (one unit of work): `total` is the
+/// Book's Chapter count, and the interrupted Chapter counts as not completed.
 @MainActor
 private func renderBlocks(
-    _ blocks: [Block], chapterNumber: Int, voice: AVSpeechSynthesisVoice, rate: Double, in scratch: URL
+    _ blocks: [Block], chapterNumber: Int, total: Int, voice: AVSpeechSynthesisVoice, rate: Double, in scratch: URL
 ) throws -> [URL] {
     var segments: [URL] = []
     for (offset, block) in blocks.enumerated() {
@@ -210,6 +283,9 @@ private func renderBlocks(
         utterance.voice = voice
         utterance.rate = Float(rate)
         try Synthesis.render(utterance: utterance, to: cafURL)
+        // The Block is the unit of work (ticket 06): a SIGINT arrives
+        // during the render and is acted on as soon as this Block is done.
+        try ensureNotInterrupted(completed: chapterNumber - 1, total: total)
         segments.append(cafURL)
     }
     return segments
@@ -245,9 +321,14 @@ private func formatSize(_ bytes: Int) -> String {
     return String(format: "%.1f GB", mib / 1024)
 }
 
-/// The v1 flag set; `--force`, `--keep-scratch` and `-o` arrive in
-/// ticket 06 and friends.
-private let usageLine = "Usage: saybook <book.epub> [--voice NAME] [--rate 0.0–1.0] [--language LL]"
+/// True when `path` exists and is a directory.
+private func isDirectory(_ path: String) -> Bool {
+    var flag: ObjCBool = false
+    return FileManager.default.fileExists(atPath: path, isDirectory: &flag) && flag.boolValue
+}
+
+/// The v1 flag set (ticket 06 added `-o`, `--force` and `--keep-scratch`).
+private let usageLine = "Usage: saybook <book.epub> [-o OUT.m4b] [--voice NAME] [--rate 0.0–1.0] [--language LL] [--keep-scratch] [--force]"
 
 /// Readable messages for command-line user errors (exit 1).
 private func reportOptionsError(_ error: CLIOptionsError) {
@@ -258,7 +339,7 @@ private func reportOptionsError(_ error: CLIOptionsError) {
         report("error: Unknown option: \(option)")
         report(usageLine)
     case let .missingValue(for: flag):
-        report("error: --\(flag) requires a value")
+        report("error: \(flag) requires a value")
         report(usageLine)
     case let .invalidRate(value):
         report("error: Rate must be a number between 0.0 and 1.0: \(value)")

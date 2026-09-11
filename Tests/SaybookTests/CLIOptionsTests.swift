@@ -15,6 +15,9 @@ final class CLIOptionsTests: XCTestCase {
         XCTAssertNil(options.voice)
         XCTAssertEqual(options.rate, 0.5, "the spec default is 0.5")
         XCTAssertNil(options.language)
+        XCTAssertNil(options.outputPath)
+        XCTAssertFalse(options.force)
+        XCTAssertFalse(options.keepScratch)
     }
 
     func testFlagsInAnyOrder() throws {
@@ -46,7 +49,7 @@ final class CLIOptionsTests: XCTestCase {
     }
 
     func testFlagWithoutValueIsMissingValue() {
-        for (flag, value) in ["--voice": "voice", "--language": "language"] {
+        for (flag, value) in ["--voice": "--voice", "--language": "--language"] {
             XCTAssertThrowsError(try CLIOptions.parse(["book.epub", flag])) {
                 XCTAssertEqual($0 as? CLIOptionsError, .missingValue(for: value))
             }
@@ -57,7 +60,7 @@ final class CLIOptionsTests: XCTestCase {
         }
         // --rate has no value at all when it ends the arguments.
         XCTAssertThrowsError(try CLIOptions.parse(["book.epub", "--rate"])) {
-            XCTAssertEqual($0 as? CLIOptionsError, .missingValue(for: "rate"))
+            XCTAssertEqual($0 as? CLIOptionsError, .missingValue(for: "--rate"))
         }
         // …but a flag-looking value is still taken: a negative rate is an
         // out-of-range rate, reported as such.
@@ -81,12 +84,38 @@ final class CLIOptionsTests: XCTestCase {
     }
 
     func testUnknownFlagIsRejected() {
-        // v1 has no --force/--keep-scratch/-o (ticket 06 and friends):
-        // they are unknown flags until then.
-        for flag in ["--force", "--keep-scratch", "-o"] {
+        // `--output` has no long alias (the spec names only `-o`):
+        // it is an unknown flag.
+        for flag in ["--loudness", "--bitrate", "--output"] {
             XCTAssertThrowsError(try CLIOptions.parse(["book.epub", flag])) {
                 XCTAssertEqual($0 as? CLIOptionsError, .unknownOption(flag))
             }
+        }
+    }
+
+    // MARK: - Ticket 06: -o, --force, --keep-scratch
+
+    func testOutputFlag() throws {
+        let options = try CLIOptions.parse(["book.epub", "-o", "custom.m4b"])
+        XCTAssertEqual(options.outputPath, "custom.m4b")
+    }
+
+    func testBooleanFlagsParseInAnyOrder() throws {
+        let options = try CLIOptions.parse(["--force", "book.epub", "--keep-scratch"])
+        XCTAssertTrue(options.force)
+        XCTAssertTrue(options.keepScratch)
+    }
+
+    func testForceAndKeepScratchDoNotConsumeAValue() throws {
+        // A following flag must still parse as that flag, not as a value.
+        let options = try CLIOptions.parse(["book.epub", "--force", "--rate", "0.7"])
+        XCTAssertTrue(options.force)
+        XCTAssertEqual(options.rate, 0.7)
+    }
+
+    func testOutputFlagWithoutValueIsMissingValue() {
+        XCTAssertThrowsError(try CLIOptions.parse(["book.epub", "-o"])) {
+            XCTAssertEqual($0 as? CLIOptionsError, .missingValue(for: "-o"))
         }
     }
 }

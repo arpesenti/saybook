@@ -391,7 +391,10 @@ final class CLITests: XCTestCase {
         // Spine order; the empty chapter 4 never gets a CAF); at least
         // chapter 1 completed before the kill.
         let surviving = (1...3).filter { FileManager.default.fileExists(atPath: cafURL($0).path) }
-        XCTAssertEqual(surviving, Array(1...surviving.count), "surviving CAFs must be a prefix: \(scratch.path)")
+        // A prefix (1…k) is itself a prefix; `1...count` would trap on an
+        // empty prefix.
+        let expectedPrefix = surviving.isEmpty ? [] : Array(1...surviving.count)
+        XCTAssertEqual(surviving, expectedPrefix, "surviving CAFs must be a prefix: \(scratch.path)")
         XCTAssertFalse(surviving.isEmpty, "no chapter CAF survived the kill: \(scratch.path)")
         if surviving.count < 3 {
             // The chapter that was mid-render must not have published a
@@ -669,11 +672,343 @@ final class CLITests: XCTestCase {
             at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
         )
 
-        let result = try run([input.path, "--force"])
+        let result = try run([input.path, "--loudness"])
 
         XCTAssertEqual(result.exit, 1)
-        XCTAssertTrue(result.stderr.contains("--force"), "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("--loudness"), "stderr: \(result.stderr)")
         XCTAssertTrue(result.stderr.contains("Usage"), "stderr: \(result.stderr)")
+    }
+
+    // MARK: - Ticket 06: error paths, safety & signals
+
+    /// A DRM-protected Book (encrypted content item, listed in
+    /// `META-INF/encryption.xml` and declared `x-enc+xml`): a readable DRM
+    /// error naming the item, exit 1, no output file — and Scratch kept for
+    /// inspection (failure keeps Scratch).
+    func testDrmContentBookFailsWithUserError() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("drm-content.epub"), to: input
+        )
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.lowercased().contains("drm"), "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("ch1.xhtml"), "stderr: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("book.m4b").path), "no output file on DRM failure")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try Scratch.directory(for: input).path), "scratch kept on failure")
+    }
+
+    /// An encrypted OPF: the same clean DRM failure, naming the OPF.
+    func testDrmOpfBookFailsWithUserError() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("drm-opf.epub"), to: input
+        )
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.lowercased().contains("drm"), "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("content.opf"), "stderr: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("book.m4b").path))
+    }
+
+    /// A Book whose Spine holds only never-spoken documents: exit 1 with a
+    /// message naming the failure (not a generic "not a valid EPUB").
+    func testNoReadableChaptersBookFailsWithUserError() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("no-readable-chapters.epub"), to: input
+        )
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.lowercased().contains("no readable chapters"), "stderr: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("book.m4b").path))
+    }
+
+    /// A Book whose one Chapter yields no text (an image-only document): no
+    /// audio and no Chapter Marker are possible, so the run fails with the
+    /// no-readable-chapters message naming the Book. No synthesis happens.
+    func testAllEmptyBookFailsWithUserError() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("all-empty-book.epub"), to: input
+        )
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.lowercased().contains("no readable chapters"), "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("All Empty Book"), "the Book's title is named: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("book.m4b").path))
+    }
+
+    /// Non-XHTML Spine items (video, image) are skipped without failing the
+    /// run: the fixture's `intro.mp4`/`art.png` are not even in the archive,
+    /// so reading either would fail the run. Only the two chapters are
+    /// spoken, in Spine order, with their Chapter Markers.
+    func testMediaSpineBookSkipsNonXhtmlItems() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("media-spine.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+
+        let result = try run([input.path])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let lines = result.stderr.split(separator: "\n").map(String.init)
+        let progress = lines.filter { $0.hasPrefix("✓") }
+        XCTAssertEqual(progress.count, 2, "stderr: \(result.stderr)")
+        XCTAssertTrue(progress[0].contains("1/2"), "stderr: \(result.stderr)")
+        XCTAssertTrue(progress[1].contains("2/2"), "stderr: \(result.stderr)")
+        XCTAssertEqual(
+            ChapterMarkers.parseChpl(from: try Data(contentsOf: expected), trackTimescale: Synthesis.trackTimescale)?.map(\.title),
+            ["Media One", "Media Two"]
+        )
+    }
+
+    /// `--force` replaces an existing output file: the sentinel is gone,
+    /// replaced by a valid M4B. (Without `--force` the refusal is covered by
+    /// `testExistingOutputIsRefused`.)
+    func testForceReplacesExistingOutput() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+        try Data("sentinel".utf8).write(to: expected)
+
+        let result = try run([input.path, "--force"])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let data = try Data(contentsOf: expected)
+        XCTAssertEqual(String(data: data[8..<12], encoding: .isoLatin1), "M4B ", "sentinel replaced by a valid M4B")
+    }
+
+    /// `-o` writes to the given path (default `<InputBase>.m4b` is not
+    /// created).
+    func testOutputFlagWritesToCustomPath() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        let custom = dir.appendingPathComponent("custom.m4b")
+
+        let result = try run([input.path, "-o", custom.path])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let data = try Data(contentsOf: custom)
+        XCTAssertEqual(String(data: data[8..<12], encoding: .isoLatin1), "M4B ")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("book.m4b").path), "default output path not used")
+    }
+
+    /// `-o` with a parent directory that does not exist: a fast user error
+    /// (exit 1) before any work starts — no output, no Scratch.
+    func testOutputFlagMissingParentDirectoryFailsWithUserError() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        let missing = dir.appendingPathComponent("no/such/dir/out.m4b")
+
+        let result = try run([input.path, "-o", missing.path])
+
+        XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.lowercased().contains("output directory"), "stderr: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try Scratch.directory(for: input).path), "no scratch created")
+    }
+
+    /// `-o` pointing at an existing directory is refused (exit 1), with or
+    /// without `--force` — the tool replaces files, never directories.
+    func testOutputPathThatIsADirectoryFailsWithUserError() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        let outDir = dir.appendingPathComponent("outdir")
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+
+        for args in [[input.path, "-o", outDir.path], [input.path, "--force", "-o", outDir.path]] {
+            let result = try run(args)
+            XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+            XCTAssertTrue(result.stderr.lowercased().contains("directory"), "stderr: \(result.stderr)")
+            var isDirectory: ObjCBool = false
+            XCTAssertTrue(FileManager.default.fileExists(atPath: outDir.path, isDirectory: &isDirectory))
+            XCTAssertTrue(isDirectory.boolValue, "the directory is untouched")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: try Scratch.directory(for: input).path), "no scratch created")
+        }
+    }
+
+    /// An internal write failure (the output directory is not writable)
+    /// exits 2: the 0/1/2 contract's internal-error code. The error message
+    /// reports the kept Scratch.
+    func testUnwritableOutputFailsWithInternalError() throws {
+        guard geteuid() != 0 else {
+            throw XCTSkip("needs a non-root user (root bypasses directory permissions)")
+        }
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        let outDir = dir.appendingPathComponent("readonly")
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: outDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: outDir.path)
+        }
+
+        let result = try run([input.path, "-o", outDir.appendingPathComponent("out.m4b").path])
+
+        XCTAssertEqual(result.exit, 2, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("error:"), "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("scratch kept"), "the kept scratch is reported: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outDir.appendingPathComponent("out.m4b").path))
+    }
+
+    /// `--keep-scratch`: the run succeeds, the output is written, and Scratch
+    /// (with the cached Chapter CAF) survives instead of being deleted.
+    func testKeepScratchKeepsScratchOnSuccess() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+
+        let result = try run([input.path, "--keep-scratch"])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: expected.path))
+        let scratch = try Scratch.directory(for: input)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: scratch.path), "scratch kept on success with --keep-scratch")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: Scratch.chapterCAFURL(in: scratch, index: 1).path),
+            "the cached Chapter CAF survives"
+        )
+        XCTAssertTrue(result.stderr.contains("scratch kept"), "stderr: \(result.stderr)")
+    }
+
+    /// SIGINT: the run stops after the current unit of work — exit 1 (a
+    /// clean exit, not a signal death), progress so far on stderr, Scratch
+    /// kept, no output. Re-running resumes from the surviving Chapters.
+    func testSigIntStopsRunKeepsScratchAndResumes() throws {
+        let dir = try makeTempDir()
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("multi-chapter.epub"), to: input
+        )
+        let expected = dir.appendingPathComponent("book.m4b")
+        let scratch = try Scratch.directory(for: input)
+        func cafURL(_ n: Int) -> URL { Scratch.chapterCAFURL(in: scratch, index: n) }
+
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = [input.path]
+        process.standardOutput = FileHandle.nullDevice
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+        try process.run()
+
+        // Collect stderr in the background and signal only after chapter 1
+        // has completed (its ✓ 1/4 progress line is printed once its CAF is
+        // published): the test must not depend on a sleep duration.
+        // (The lock guards a plain buffer — the reader thread writes, the
+        // main thread polls.)
+        final class Collector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var data = Data()
+            private var _eof = false
+
+            func append(_ chunk: Data) {
+                lock.lock(); data.append(chunk); lock.unlock()
+            }
+
+            var text: String {
+                lock.lock(); defer { lock.unlock() }
+                return String(decoding: data, as: UTF8.self)
+            }
+
+            var isFinished: Bool {
+                lock.lock(); defer { lock.unlock() }
+                return _eof
+            }
+
+            func finish() {
+                lock.lock(); _eof = true; lock.unlock()
+            }
+        }
+        let collector = Collector()
+        // Reads ONE byte at a time on purpose: on this SDK
+        // `read(upToCount: n)` blocks until n bytes or EOF (not until any
+        // data), so a larger read would only wake when the child exits.
+        let reader = Thread {
+            let handle = stderrPipe.fileHandleForReading
+            while let byte = try? handle.read(upToCount: 1), !byte.isEmpty {
+                collector.append(byte)
+            }
+            collector.finish()
+        }
+        reader.start()
+        let deadline = Date().addingTimeInterval(15)
+        while !collector.text.contains("✓ 1/4"), !collector.isFinished, process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertTrue(collector.text.contains("✓ 1/4"), "chapter 1 must finish before the signal")
+
+        // Chapter 2 (182 words) is mid-render when the signal lands.
+        kill(process.processIdentifier, SIGINT)
+        process.waitUntilExit()
+        // The process is gone, so the pipe is at EOF: wait for the reader to
+        // drain it (the reader cannot outlive the process).
+        let drainDeadline = Date().addingTimeInterval(5)
+        while !collector.isFinished, Date() < drainDeadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        let stderr = collector.text
+
+        // A clean stop: an exit with code 1, not an uncaught-signal death.
+        XCTAssertEqual(process.terminationReason, .exit, "SIGINT must be handled, not fatal")
+        XCTAssertEqual(process.terminationStatus, 1)
+        XCTAssertTrue(stderr.contains("interrupted"), "progress report: \(stderr)")
+        XCTAssertTrue(stderr.contains("✓ 1/4"), "progress so far: \(stderr)")
+        XCTAssertTrue(stderr.contains("scratch kept"), "resume note: \(stderr)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: scratch.path), "scratch kept for resume")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path), "no output from an interrupted run")
+        // The surviving Chapter CAFs form a prefix and the interrupted
+        // Chapter published nothing at its final name (atomic publish).
+        let surviving = (1...3).filter { FileManager.default.fileExists(atPath: cafURL($0).path) }
+        // A prefix (1…k) is itself a prefix; `1...count` would trap on an
+        // empty prefix.
+        let expectedPrefix = surviving.isEmpty ? [] : Array(1...surviving.count)
+        XCTAssertEqual(surviving, expectedPrefix, "surviving CAFs must be a prefix: \(scratch.path)")
+        XCTAssertFalse(surviving.isEmpty, "chapter 1 finished before the signal: \(scratch.path)")
+
+        // Re-run: resumes from Scratch and completes.
+        let result = try run([input.path])
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        for n in surviving {
+            XCTAssertTrue(result.stderr.contains("⏭ \(n)/4"), "chapter \(n) not reported cached: \(result.stderr)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratch.path), "scratch deleted on success")
+        let markers = ChapterMarkers.parseChpl(from: try Data(contentsOf: expected), trackTimescale: Synthesis.trackTimescale)
+        XCTAssertEqual(markers?.count, 3, "stderr: \(result.stderr)")
+        XCTAssertEqual(markers?.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
     }
 }
 

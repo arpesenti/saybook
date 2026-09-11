@@ -39,6 +39,29 @@ extension XCTestCase {
         task.waitUntilExit()
         XCTAssertEqual(task.terminationStatus, 0, "zip failed: \(archive.path)")
     }
+
+    /// Runs `/usr/bin/zip -X -r <archive> .` inside `root`, preserving
+    /// `root`'s directory structure (paths are relative to `root`).
+    func zipTree(_ root: URL, into archive: URL) throws {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        task.arguments = ["-X", "-r", "-q", archive.path, "."]
+        task.currentDirectoryURL = root
+        try task.run()
+        task.waitUntilExit()
+        XCTAssertEqual(task.terminationStatus, 0, "zip failed: \(archive.path)")
+    }
+
+    /// Writes `content` to `root/...` creating intermediate directories.
+    @discardableResult
+    func writeTreeFile(_ content: String, at relativePath: String, under root: URL) throws -> URL {
+        let url = root.appendingPathComponent(relativePath)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try content.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
 }
 
 /// Writes a mono 22.05 kHz Float32 CAF (the Synthesis output format) with

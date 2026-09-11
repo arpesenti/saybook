@@ -233,4 +233,204 @@ final class EpubTests: XCTestCase {
         XCTAssertEqual(book.cover, .absent)
         XCTAssertEqual(book.chapters.map(\.title), ["Chapter Alpha", "Chapter Beta"])
     }
+
+    // MARK: - Ticket 06: error paths, safety & signals
+
+    /// The `META-INF/container.xml` pointing at `OEBPS/content.opf` (shared
+    /// by the in-memory mini-EPUBs below).
+    private static let containerXML = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+      <rootfiles>
+        <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+      </rootfiles>
+    </container>
+    """
+
+    /// Builds a minimal one-chapter EPUB tree under `root` (mimetype,
+    /// META-INF, OEBPS) with knobs for the DRM signals: an arbitrary
+    /// `encryption.xml` (root-relative item URIs), the chapter item's
+    /// manifest media type, and the Spine's itemrefs.
+    private func makeMiniEpub(
+        in root: URL,
+        ch1MediaType: String = "application/xhtml+xml",
+        ch1Href: String = "ch1.xhtml",
+        spineXML: String = "<itemref idref=\"ch1\"/>",
+        encryptionXML: String? = nil
+    ) throws {
+        let opf = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:identifier id="bookid">urn:uuid:mini</dc:identifier>
+            <dc:title>Mini Book</dc:title>
+            <dc:creator>Mini Author</dc:creator>
+            <dc:language>en</dc:language>
+          </metadata>
+          <manifest>
+            <item id="ch1" href="\(ch1Href)" media-type="\(ch1MediaType)"/>
+          </manifest>
+          <spine>
+            \(spineXML)
+          </spine>
+        </package>
+        """
+        let ch1 = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml">
+        <head><title>Mini Chapter</title></head>
+        <body><h1>Mini Chapter</h1><p>Some text.</p></body>
+        </html>
+        """
+        try writeTreeFile("application/epub+zip", at: "mimetype", under: root)
+        try writeTreeFile(Self.containerXML, at: "META-INF/container.xml", under: root)
+        try writeTreeFile(opf, at: "OEBPS/content.opf", under: root)
+        try writeTreeFile(ch1, at: "OEBPS/\(ch1Href)", under: root)
+        if let encryptionXML { try writeTreeFile(encryptionXML, at: "META-INF/encryption.xml", under: root) }
+    }
+
+    /// A real DRM-style book: `META-INF/encryption.xml` lists the content
+    /// document AND the manifest declares it with the `x-enc+xml` media type.
+    func testLoadDrmContentFixtureFailsWithDrmError() throws {
+        let scratch = try makeTempDir()
+        XCTAssertThrowsError(
+            try Epub.load(bookAt: fixturesDir.appendingPathComponent("drm-content.epub"), scratch: scratch)
+        ) { error in
+            XCTAssertEqual(error as? Epub.EpubError, .drmEncrypted(uri: "ch1.xhtml"))
+        }
+    }
+
+    /// An encrypted OPF: `container.xml` still resolves, but the OPF's
+    /// bytes are cipher text. The run must fail with the DRM error before
+    /// attempting to parse the OPF.
+    func testLoadDrmOpfFixtureFailsWithDrmError() throws {
+        let scratch = try makeTempDir()
+        XCTAssertThrowsError(
+            try Epub.load(bookAt: fixturesDir.appendingPathComponent("drm-opf.epub"), scratch: scratch)
+        ) { error in
+            XCTAssertEqual(error as? Epub.EpubError, .drmEncrypted(uri: "OEBPS/content.opf"))
+        }
+    }
+
+    /// The encryption.xml signal alone: the chapter is listed in
+    /// `META-INF/encryption.xml` while the manifest still calls it XHTML.
+    func testLoadFailsWhenSpineItemListedInEncryptionXml() throws {
+        let dir = try makeTempDir()
+        let root = dir.appendingPathComponent("tree")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeMiniEpub(in: root, encryptionXML: """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <encryption xmlns:enc="urn:oasis:names:tc:opendocument:xmlns:encryption">
+          <enc:EncryptedData URI="OEBPS/ch1.xhtml" Type="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+        </encryption>
+        """)
+        let archive = dir.appendingPathComponent("mini.epub")
+        try zipTree(root, into: archive)
+
+        XCTAssertThrowsError(try Epub.load(bookAt: archive, scratch: dir.appendingPathComponent("scratch"))) {
+            XCTAssertEqual($0 as? Epub.EpubError, .drmEncrypted(uri: "ch1.xhtml"))
+        }
+    }
+
+    /// The media-type signal alone: the manifest declares the chapter as
+    /// encrypted data (`x-enc+xml`) and there is no `encryption.xml`.
+    func testLoadFailsWhenSpineItemDeclaredEncryptedMediaType() throws {
+        let dir = try makeTempDir()
+        let root = dir.appendingPathComponent("tree")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeMiniEpub(in: root, ch1MediaType: "application/x-enc+xml")
+        let archive = dir.appendingPathComponent("mini.epub")
+        try zipTree(root, into: archive)
+
+        XCTAssertThrowsError(try Epub.load(bookAt: archive, scratch: dir.appendingPathComponent("scratch"))) {
+            XCTAssertEqual($0 as? Epub.EpubError, .drmEncrypted(uri: "ch1.xhtml"))
+        }
+    }
+
+    /// DRM is a Book-level constraint (spec: "encrypted content → clean
+    /// error"): an `encryption.xml` entry that names a non-Spine item (a
+    /// cover image) still makes the book DRM-protected.
+    func testLoadFailsWhenNonSpineItemIsEncrypted() throws {
+        let dir = try makeTempDir()
+        let root = dir.appendingPathComponent("tree")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try writeTreeFile("application/epub+zip", at: "mimetype", under: root)
+        try writeTreeFile(Self.containerXML, at: "META-INF/container.xml", under: root)
+        try writeTreeFile("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:identifier id="bookid">urn:uuid:drm-cover</dc:identifier>
+            <dc:title>DRM Cover Book</dc:title>
+            <dc:language>en</dc:language>
+          </metadata>
+          <manifest>
+            <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="cover" href="art.png" media-type="image/png"/>
+          </manifest>
+          <spine>
+            <itemref idref="ch1"/>
+          </spine>
+        </package>
+        """, at: "OEBPS/content.opf", under: root)
+        try writeTreeFile("<html><body><p>Text.</p></body></html>", at: "OEBPS/ch1.xhtml", under: root)
+        try writeTreeFile("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <encryption xmlns:enc="urn:oasis:names:tc:opendocument:xmlns:encryption">
+          <enc:EncryptedData URI="OEBPS/art.png" Type="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+        </encryption>
+        """, at: "META-INF/encryption.xml", under: root)
+        let archive = dir.appendingPathComponent("mini.epub")
+        try zipTree(root, into: archive)
+
+        XCTAssertThrowsError(try Epub.load(bookAt: archive, scratch: dir.appendingPathComponent("scratch"))) {
+            XCTAssertEqual($0 as? Epub.EpubError, .drmEncrypted(uri: "art.png"))
+        }
+    }
+
+    /// A Book whose Spine holds only never-spoken documents (a `linear="no"`
+    /// cover page): no readable Chapters is its own error, distinct from a
+    /// structurally invalid EPUB.
+    func testLoadNoReadableChaptersFixture() throws {
+        let scratch = try makeTempDir()
+        XCTAssertThrowsError(
+            try Epub.load(
+                bookAt: fixturesDir.appendingPathComponent("no-readable-chapters.epub"),
+                scratch: scratch
+            )
+        ) { error in
+            XCTAssertEqual(error as? Epub.EpubError, .noReadableChapters)
+        }
+    }
+
+    /// An empty Spine (no itemrefs at all) is the same failure.
+    func testLoadEmptySpineIsNoReadableChapters() throws {
+        let dir = try makeTempDir()
+        let root = dir.appendingPathComponent("tree")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeMiniEpub(in: root, spineXML: "")
+        let archive = dir.appendingPathComponent("mini.epub")
+        try zipTree(root, into: archive)
+
+        XCTAssertThrowsError(try Epub.load(bookAt: archive, scratch: dir.appendingPathComponent("scratch"))) {
+            XCTAssertEqual($0 as? Epub.EpubError, .noReadableChapters)
+        }
+    }
+
+    /// Non-XHTML Spine items (video, images, other media) are skipped
+    /// without failing the run: the fixture's `intro.mp4` and `art.png` are
+    /// not even in the archive, so reading them would fail the run.
+    func testLoadSkipsNonXhtmlSpineItems() throws {
+        let scratch = try makeTempDir()
+        let book = try Epub.load(
+            bookAt: fixturesDir.appendingPathComponent("media-spine.epub"),
+            scratch: scratch
+        )
+
+        XCTAssertEqual(book.title, "Media Spine Book")
+        // Only the two XHTML documents are readable Spine documents.
+        XCTAssertEqual(book.chapters.map(\.title), ["Media One", "Media Two"])
+        XCTAssertEqual(book.chapters[0].blocks.map(\.text), ["Media One", "The quick brown fox jumps over the lazy dog."])
+        XCTAssertEqual(book.chapters[1].blocks.map(\.text), ["Media Two", "Pack my box with five dozen liquor jugs."])
+    }
 }

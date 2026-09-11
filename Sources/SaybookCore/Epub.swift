@@ -75,8 +75,16 @@ public enum Epub {
 
     public enum EpubError: Error, Equatable {
         /// The file is not a readable, well-formed EPUB (bad archive, missing
-        /// container or OPF, or no readable Spine documents).
+        /// container or OPF).
         case notAValidEpub
+        /// The EPUB is well-formed but its Spine holds no readable documents
+        /// (e.g. only `linear="no"` cover pages).
+        case noReadableChapters
+        /// The Book is DRM-protected: `uri` — the OPF's archive-root-relative
+        /// path, or the manifest `href` of an encrypted item — is
+        /// listed in `META-INF/encryption.xml` or declared with an encrypted
+        /// media type.
+        case drmEncrypted(uri: String)
     }
 
     /// `properties` values marking a Spine document as never spoken: the
@@ -86,11 +94,28 @@ public enum Epub {
         "nav", "cover", "doc-cover", "doc-titlepage",
     ]
 
+    /// Media types declaring an item's data as encrypted (EPUB 2/3 DRM).
+    private static let encryptedMediaTypes: Set<String> = [
+        "application/x-enc+xml", "text/x-enc+xml",
+    ]
+
     public static func load(bookAt url: URL, scratch: URL) throws -> Book {
         try unpack(bookAt: url, into: scratch)
-        let opfURL = try opfURL(in: scratch)
+        let (opfURL, opfURI) = try opfLocation(in: scratch)
+
+        // DRM (ticket 06): `META-INF/encryption.xml` lists the Book's
+        // encrypted items by archive-root-relative URI. An encrypted OPF or
+        // an encrypted content item is a clean early failure — never a
+        // crash, never a half-written output (spec: "encrypted content →
+        // clean error").
+        let encrypted = encryptedItemPaths(in: scratch)
+        if isEncrypted(opfURL, in: encrypted) {
+            throw EpubError.drmEncrypted(uri: opfURI)
+        }
+
         let opf = try parseOPF(at: opfURL)
         let opfDir = opfURL.deletingLastPathComponent()
+        try checkManifestForDRM(opf: opf, opfDir: opfDir, encrypted: encrypted)
 
         // Chapter titles from the EPUB3 navigation document when present;
         // otherwise the largest-heading → filename fallback applies.
@@ -120,7 +145,7 @@ public enum Epub {
                 )
             )
         }
-        guard !chapters.isEmpty else { throw EpubError.notAValidEpub }
+        guard !chapters.isEmpty else { throw EpubError.noReadableChapters }
 
         return Book(
             title: opf.title,
@@ -175,15 +200,53 @@ public enum Epub {
         }
     }
 
-    private static func opfURL(in scratch: URL) throws -> URL {
+    /// The OPF's URL and its archive-root-relative path (the container
+    /// `rootfile`'s `full-path`); the relative path is what a DRM error names.
+    private static func opfLocation(in scratch: URL) throws -> (url: URL, uri: String) {
         let containerURL = scratch.appendingPathComponent("META-INF/container.xml")
         let xml = try readUTF8(containerURL)
         // <rootfile full-path="OEBPS/content.opf" media-type="..."/>
         guard let path = xml.firstMatch(of: /<rootfile\b[^>]*\bfull-path\s*=\s*"([^"]+)"/)?.1
         else { throw EpubError.notAValidEpub }
-        let opf = scratch.appendingPathComponent(String(path))
+        let uri = String(path)
+        let opf = scratch.appendingPathComponent(uri)
         guard FileManager.default.fileExists(atPath: opf.path) else { throw EpubError.notAValidEpub }
-        return opf
+        return (opf, uri)
+    }
+
+    /// The absolute paths of the items `META-INF/encryption.xml` declares
+    /// encrypted: its `URI` attributes are relative to the archive root, so
+    /// each is resolved against Scratch (the unpacked archive root). nil when
+    /// the Book declares no encryption (a non-DRM Book).
+    private static func encryptedItemPaths(in scratch: URL) -> Set<String>? {
+        let xml = try? readUTF8(scratch.appendingPathComponent("META-INF/encryption.xml"))
+        guard let xml else { return nil }
+        return Set(
+            xml.matches(of: /URI\s*=\s*"([^"]+)"/)
+                .map { scratch.appendingPathComponent(String($0.1)).standardized.path }
+        )
+    }
+
+    /// Whether `url` is listed as encrypted in `encryption.xml` (a nil set —
+    /// no encryption declared — never matches).
+    private static func isEncrypted(_ url: URL, in encrypted: Set<String>?) -> Bool {
+        guard let encrypted else { return false }
+        return encrypted.contains(url.standardized.path)
+    }
+
+    /// Fails the load when any manifest item is encrypted — a book that
+    /// encrypts *any* of its items is not a non-DRM Book (spec constraint).
+    /// An item is encrypted when its `href` (resolved against the OPF's
+    /// directory) matches an `encryption.xml` entry, or the manifest declares
+    /// it with an encrypted-data media type.
+    private static func checkManifestForDRM(opf: OPF, opfDir: URL, encrypted: Set<String>?) throws {
+        for id in opf.itemOrder {
+            guard let item = opf.items[id] else { continue }
+            if isEncrypted(opfDir.appendingPathComponent(item.href), in: encrypted)
+                || encryptedMediaTypes.contains(item.mediaType.lowercased()) {
+                throw EpubError.drmEncrypted(uri: item.href)
+            }
+        }
     }
 
     private static func parseOPF(at url: URL) throws -> OPF {
