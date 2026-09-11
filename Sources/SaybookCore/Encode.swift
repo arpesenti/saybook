@@ -1,6 +1,5 @@
 import AVFoundation
 import Foundation
-import Dispatch
 
 /// Encodes a PCM CAF into an M4A (AAC-LC ~34 kb/s, 22.05 kHz mono) with
 /// `AVAssetExportSession`. The `ExtAudioFile` C API is not importable from

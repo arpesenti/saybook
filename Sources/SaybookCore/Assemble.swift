@@ -1,8 +1,8 @@
 import AVFoundation
 import Foundation
 
-/// Concatenates the per-Chapter PCM CAFs (already in Spine order) into one
-/// CAF, preserving the first file's format.
+/// Concatenates the per-Chapter PCM CAFs (written with `Synthesis.cafSettings`,
+/// already in Spine order) into one CAF.
 public enum Assemble {
 
     public enum AssembleError: Error, Equatable {
@@ -12,17 +12,7 @@ public enum Assemble {
 
     public static func concatenate(_ inputs: [URL], to output: URL) throws {
         guard !inputs.isEmpty else { throw AssembleError.noInputFiles }
-        let reference = try AVAudioFile(forReading: inputs[0])
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: reference.processingFormat.sampleRate,
-            AVNumberOfChannelsKey: reference.processingFormat.channelCount,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false,
-        ]
-        let out = try AVAudioFile(forWriting: output, settings: settings)
+        let out = try AVAudioFile(forWriting: output, settings: Synthesis.cafSettings)
         let capacity = AVAudioFrameCount(65_536)
 
         for input in inputs {

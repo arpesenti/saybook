@@ -42,9 +42,7 @@ public enum Epub {
                   item.mediaType.localizedCaseInsensitiveContains("html")
             else { continue }
             let fileURL = opfURL.deletingLastPathComponent().appendingPathComponent(item.href)
-            guard let data = try? Data(contentsOf: fileURL),
-                  let text = String(data: data, encoding: .utf8)
-            else { throw EpubError.notAValidEpub }
+            let text = try readUTF8(fileURL)
             chapters.append(
                 Chapter(
                     title: fileURL.deletingPathExtension().lastPathComponent,
@@ -93,9 +91,7 @@ public enum Epub {
 
     private static func opfURL(in scratch: URL) throws -> URL {
         let containerURL = scratch.appendingPathComponent("META-INF/container.xml")
-        guard let data = try? Data(contentsOf: containerURL),
-              let xml = String(data: data, encoding: .utf8)
-        else { throw EpubError.notAValidEpub }
+        let xml = try readUTF8(containerURL)
         // <rootfile full-path="OEBPS/content.opf" media-type="..."/>
         guard let path = xml.firstMatch(of: /<rootfile\b[^>]*\bfull-path\s*=\s*"([^"]+)"/)?.1
         else { throw EpubError.notAValidEpub }
@@ -105,19 +101,17 @@ public enum Epub {
     }
 
     private static func parseOPF(at url: URL) throws -> OPF {
-        guard let data = try? Data(contentsOf: url),
-              let xml = String(data: data, encoding: .utf8)
-        else { throw EpubError.notAValidEpub }
+        let xml = try readUTF8(url)
 
         var opf = OPF()
-        if let m = xml.firstMatch(of: /(?s)<dc:title[^>]*>(.*?)<\/dc:title>/) {
-            opf.title = clean(m.1)
+        if let title = firstCapture(/(?s)<dc:title[^>]*>(.*?)<\/dc:title>/, in: xml) {
+            opf.title = title
         }
-        if let m = xml.firstMatch(of: /(?s)<dc:creator[^>]*>(.*?)<\/dc:creator>/) {
-            opf.author = clean(m.1)
+        if let author = firstCapture(/(?s)<dc:creator[^>]*>(.*?)<\/dc:creator>/, in: xml) {
+            opf.author = author
         }
-        if let m = xml.firstMatch(of: /(?s)<dc:language[^>]*>(.*?)<\/dc:language>/) {
-            opf.language = clean(m.1)
+        if let language = firstCapture(/(?s)<dc:language[^>]*>(.*?)<\/dc:language>/, in: xml) {
+            opf.language = language
         }
         // <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
         for item in xml.matches(of: /<item\b([^>]*?)\/>/) {
@@ -132,8 +126,22 @@ public enum Epub {
         return opf
     }
 
-    private static func clean(_ raw: Substring) -> String {
+    /// The first capture group of `regex` in `xml`, entity-decoded and trimmed.
+    /// (A single-capture regex literal has output type (wholeMatch, capture).)
+    private static func firstCapture(_ regex: Regex<(Substring, Substring)>, in xml: String) -> String? {
+        xml.firstMatch(of: regex).map { decodeAndTrim($0.1) }
+    }
+
+    private static func decodeAndTrim(_ raw: Substring) -> String {
         decodeEntities(String(raw)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Reads a file as UTF-8; a missing or non-UTF-8 file is a bad EPUB.
+    private static func readUTF8(_ url: URL) throws -> String {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8)
+        else { throw EpubError.notAValidEpub }
+        return text
     }
 
     private static func parseAttributes(_ raw: Substring) -> [String: String] {

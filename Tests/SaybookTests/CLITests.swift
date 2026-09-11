@@ -58,14 +58,14 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(String(data: data[8..<12], encoding: .isoLatin1), "M4B ")
         XCTAssertEqual(String(data: data[12..<24], encoding: .isoLatin1), "m4b mp42isom")
 
-        // The output decodes as 22.05 kHz mono AAC with a plausible duration
-        // for the fixture's short chapter text.
+        // The output decodes as 22.05 kHz mono AAC. Duration is within ±10% of
+        // the expected for the fixture's 21 words at the default voice (rate
+        // 0.5): baseline measured at 7.0 s on macOS 26 (ticket 01 comment).
         let file = try AVAudioFile(forReading: expected)
         XCTAssertEqual(file.processingFormat.sampleRate, 22050)
         XCTAssertEqual(file.processingFormat.channelCount, 1)
         let duration = Double(file.length) / 22050
-        XCTAssertGreaterThan(duration, 4, "duration: \(duration)")
-        XCTAssertLessThan(duration, 60, "duration: \(duration)")
+        XCTAssertEqual(duration, 7.0, accuracy: 0.7, "duration: \(duration)")
     }
 
     func testExistingOutputIsRefused() throws {
