@@ -1,0 +1,19 @@
+# 01: Skeleton — one-chapter Book to playable M4B
+
+**What to build:** `saybook <book.epub>` on a simple single-chapter, non-DRM EPUB produces a playable M4B Audiobook beside the input. This lays the whole foundation: the Swift package and CLI entry, opening an EPUB (system `ditto` unzip into Scratch, OPF/Spine reading), basic Chapter text extraction (v1-crude: one utterance per Chapter), offline Synthesis via `AVSpeechSynthesizer.write()` with the main runloop pumped, per-chapter CAF in Scratch concatenated in Spine order, AAC encoding, and the M4B brand patch. Output defaults to `<InputBase>.m4b`; existing output → exit 1. One progress line per completed Chapter on stderr.
+
+**Blocked by:** None (can start immediately)
+
+**Status:** resolved
+
+- [x] `swift build` succeeds with zero third-party dependencies; deployment target macOS 13
+- [x] Given a single-chapter EPUB, the command writes `<InputBase>.m4b` beside the input
+- [x] `file` reports the output as an M4B Audio Book (major brand `M4B `, compatible brands `m4b mp42 isom`)
+- [x] The output decodes cleanly (ffprobe/ffmpeg) as ~22.05 kHz mono AAC with duration within ±10% of the expected value for the Chapter's text length
+- [x] One progress line per completed Chapter on stderr
+- [x] If the output file already exists, the tool refuses with a readable message and exit 1
+- [x] Study the verified prototype probe in this feature directory (`prototype/verified-pipeline.swift`) first — it encodes the plumbing decisions (runloop pumping, buffer writing, export, brand-patch byte layout) with the gotchas measured on this machine
+
+## Comments
+
+- 2026-09-11 (agent): Implemented. Swift package `saybook` (executable) + `SaybookCore` library; pipeline: `Epub.load` (ditto unpack → OPF/Spine, regex-based, `FoundationXML` is not importable from SwiftPM) → per-Chapter `Synthesis.render` (`AVSpeechSynthesizer.write` + main-runloop pump, 22.05 kHz Float32 CAFs) → `Assemble.concatenate` (Spine order) → `Encode.encodeCAF` (`AVAssetExportSession` M4A) → `Brand.patchFTyp` → output beside input. macOS 26 SDK gotchas hit: `AVAudioFile.read(into:)` throws `nilError` at EOF (loop bounded by file length) and `forWriting:format:`/`closeFile()` are gone (settings-based init only). Seams tested: `Brand.patchFTyp` bytes, `Epub.load` on the in-repo `single-chapter.epub` fixture, `Assemble` frame math, and the real binary (exit codes, output location, M4B brand, stderr progress, refusal). Manual checks: `file` → "(.M4B) Audio Book"; ffprobe → aac 22050 Hz mono ~34 kb/s; ffmpeg full decode clean; duration 7.06 s for the fixture's 19 words. Out of scope for this ticket (per tickets 02–07): `chpl` markers, resume/summary, ilst/covr/nav, voice flags, block-level extraction, `--force`/DRM/SIGINT, E2E script/README. Note: `--force`-less refusal message does not yet name a flag (that arrives with ticket 06).
