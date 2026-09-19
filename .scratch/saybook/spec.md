@@ -16,7 +16,7 @@
 ## CLI
 
 ```
-saybook <book.epub> [-o out.m4b] [--voice V] [--rate 0.0–1.0] [--language LL] [--keep-scratch] [--force]
+saybook <book.epub> [-o out.m4b] [--voice V] [--rate 0.0–1.0] [--language LL] [--engine apple|siri] [--keep-scratch] [--force]
 ```
 
 - Output default: `<InputBase>.m4b` beside the input; no clobber without `--force`.
@@ -24,11 +24,12 @@ saybook <book.epub> [-o out.m4b] [--voice V] [--rate 0.0–1.0] [--language LL] 
 - Exit codes: 0 ok · 1 input/user error (bad EPUB, DRM-encrypted content, no readable Chapters, no Voice for language, output exists) · 2 internal error.
 - SIGINT: stop gracefully, keep Scratch, report progress (resume = re-run).
 - Empty Chapters: no audio, no Chapter Marker, reported `skipped (no text)` in the summary.
+- `--engine siri` (#08, ADR-0003): speak with Apple's **private** on-device Siri engine instead, through the same 22.05 kHz CAF contract, so everything downstream is unchanged. Opt-in only, no rate control, never falls back implicitly.
 
 ## Constraints
 
 - Non-DRM EPUBs only (encrypted content → clean error). One Book per invocation.
-- No loudness normalisation. Apple system voices only.
+- No loudness normalisation. Apple system voices by default; `--engine siri` adds the private Siri voice bundles macOS delivers — unsupported, and breakable by any OS update (ADR-0003).
 - Bitrate is the export preset's (~34 kb/s) — not a v1 tunable.
 - v1 is local use: `swift build -c release`.
 

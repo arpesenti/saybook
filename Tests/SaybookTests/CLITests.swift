@@ -234,7 +234,7 @@ final class CLITests: XCTestCase {
             VoiceSelection.best(forLanguage: "en", in: VoiceCatalog.installed()),
             "no English voice installed"
         )
-        try Scratch.ensureOptions(Scratch.optionsMarker(voice: defaultVoice, rate: CLIOptions.defaultRate), in: scratch)
+        try Scratch.ensureOptions(Scratch.optionsMarker(engine: .apple, voice: defaultVoice, rate: CLIOptions.defaultRate), in: scratch)
         let frames = [22_050, 11_025, 33_075]
         let cafs = (1...3).map { Scratch.chapterCAFURL(in: scratch, index: $0) }
         for (i, caf) in cafs.enumerated() {
@@ -645,7 +645,7 @@ final class CLITests: XCTestCase {
             VoiceSelection.best(forLanguage: "en", in: VoiceCatalog.installed()),
             "no English voice installed"
         )
-        try Scratch.ensureOptions(Scratch.optionsMarker(voice: defaultVoice, rate: CLIOptions.defaultRate), in: scratch)
+        try Scratch.ensureOptions(Scratch.optionsMarker(engine: .apple, voice: defaultVoice, rate: CLIOptions.defaultRate), in: scratch)
         let caf = Scratch.chapterCAFURL(in: scratch, index: 1)
         try FileManager.default.createDirectory(at: caf.deletingLastPathComponent(), withIntermediateDirectories: true)
         try writeCAF(frames: 22_050, at: caf) { _ in 0.5 }
@@ -1009,6 +1009,89 @@ final class CLITests: XCTestCase {
         let markers = ChapterMarkers.parseChpl(from: try Data(contentsOf: expected), trackTimescale: Synthesis.trackTimescale)
         XCTAssertEqual(markers?.count, 3, "stderr: \(result.stderr)")
         XCTAssertEqual(markers?.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
+    }
+
+    // MARK: - `--engine` (the private Siri engine)
+
+    /// A copy of the one-chapter fixture, ready to speak.
+    private func singleChapterBook(in dir: URL) throws -> URL {
+        let input = dir.appendingPathComponent("book.epub")
+        try FileManager.default.copyItem(
+            at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
+        )
+        return input
+    }
+
+    func testUnknownEngineShowsUsageAndNamesTheValue() throws {
+        let dir = try makeTempDir()
+        let result = try run([try singleChapterBook(in: dir).path, "--engine", "eleven"])
+
+        XCTAssertEqual(result.exit, 1)
+        XCTAssertTrue(result.stderr.contains("eleven"), "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("Usage"), "stderr: \(result.stderr)")
+    }
+
+    func testRateWithTheSiriEngineIsRejectedBeforeAnyWork() throws {
+        let dir = try makeTempDir()
+        let input = try singleChapterBook(in: dir)
+        let result = try run([input.path, "--engine", "siri", "--rate", "0.8"])
+
+        XCTAssertEqual(result.exit, 1)
+        XCTAssertTrue(result.stderr.contains("--rate"), "stderr: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: input.deletingPathExtension().appendingPathExtension("m4b").path))
+    }
+
+    func testSiriEngineWithoutAVoiceFailsAsAUserError() throws {
+        guard SpeechEngine.siri.voices().isEmpty else {
+            throw XCTSkip("this Mac has a Siri voice bundle, so the missing-voice path cannot be exercised")
+        }
+        let dir = try makeTempDir()
+        let input = try singleChapterBook(in: dir)
+        let result = try run([input.path, "--engine", "siri"])
+
+        XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.lowercased().contains("siri"), "stderr: \(result.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: input.deletingPathExtension().appendingPathExtension("m4b").path))
+    }
+
+    func testSiriEngineRendersABookAndSaysSoInTheHeader() throws {
+        guard !SpeechEngine.siri.voices().isEmpty else {
+            throw XCTSkip("this Mac has no Siri voice bundle installed")
+        }
+        let dir = try makeTempDir()
+        let input = try singleChapterBook(in: dir)
+        let result = try run([input.path, "--engine", "siri"])
+
+        XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("Engine: siri"), "the private engine is never a surprise: \(result.stderr)")
+        let output = input.deletingPathExtension().appendingPathExtension("m4b")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+        // The same fixture renders ~7 s with the Apple engine, so this band
+        // catches both failure modes: silence or a stub lands below it, a
+        // sample-rate mistake lands far above (a 2x error would be 13 s).
+        let duration = try duration(of: output)
+        XCTAssertEqual(duration, 7, accuracy: 2.5, "duration: \(duration)")
+    }
+
+    func testSwitchingEngineRendersAgainInsteadOfReusingCachedChapters() throws {
+        guard !SpeechEngine.siri.voices().isEmpty else {
+            throw XCTSkip("this Mac has no Siri voice bundle installed")
+        }
+        let dir = try makeTempDir()
+        let input = try singleChapterBook(in: dir)
+        let scratch = try Scratch.directory(for: input)
+
+        let first = try run([input.path, "-o", dir.appendingPathComponent("apple.m4b").path, "--keep-scratch"])
+        XCTAssertEqual(first.exit, 0, "stderr: \(first.stderr)")
+
+        let second = try run(
+            [input.path, "-o", dir.appendingPathComponent("siri.m4b").path, "--engine", "siri", "--keep-scratch"]
+        )
+
+        XCTAssertEqual(second.exit, 0, "stderr: \(second.stderr)")
+        XCTAssertFalse(second.stderr.contains("⏭ 1/1"), "an Apple-engine CAF must not resume a Siri run: \(second.stderr)")
+        XCTAssertTrue(second.stderr.contains("✓ 1/1"), "stderr: \(second.stderr)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: scratch.path))
     }
 }
 

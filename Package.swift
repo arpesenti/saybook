@@ -12,7 +12,16 @@ let package = Package(
             dependencies: ["SaybookCore"]
         ),
         .target(
-            name: "SaybookCore"
+            name: "SaybookCore",
+            dependencies: ["SiriTTSBridge"]
+        ),
+        // The private Siri speech engine has no public API and no Swift
+        // access: it is a C++ class reached through dlopen/dlsym. The header
+        // is pure C, so SaybookCore imports this target without C++
+        // interoperability enabled.
+        .target(
+            name: "SiriTTSBridge",
+            publicHeadersPath: "include"
         ),
         .testTarget(
             name: "SaybookTests",

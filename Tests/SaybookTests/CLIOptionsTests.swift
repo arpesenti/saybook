@@ -118,4 +118,49 @@ final class CLIOptionsTests: XCTestCase {
             XCTAssertEqual($0 as? CLIOptionsError, .missingValue(for: "-o"))
         }
     }
+
+    // MARK: - Engine selection (`--engine`)
+
+    func testEngineDefaultsToThePublicEngine() throws {
+        XCTAssertEqual(try CLIOptions.parse(["book.epub"]).engine, .apple)
+    }
+
+    func testEngineFlagAcceptsEitherEngineCaseInsensitively() throws {
+        XCTAssertEqual(try CLIOptions.parse(["book.epub", "--engine", "siri"]).engine, .siri)
+        XCTAssertEqual(try CLIOptions.parse(["book.epub", "--engine", "Apple"]).engine, .apple)
+    }
+
+    func testUnknownEngineIsAUserErrorNamingTheValue() {
+        XCTAssertThrowsError(try CLIOptions.parse(["book.epub", "--engine", "eleven"])) {
+            XCTAssertEqual($0 as? CLIOptionsError, .unknownEngine("eleven"))
+        }
+    }
+
+    func testEngineFlagWithoutValueIsMissingValue() {
+        XCTAssertThrowsError(try CLIOptions.parse(["book.epub", "--engine"])) {
+            XCTAssertEqual($0 as? CLIOptionsError, .missingValue(for: "--engine"))
+        }
+        // A following flag is not consumed as the engine name.
+        XCTAssertThrowsError(try CLIOptions.parse(["book.epub", "--engine", "--force"])) {
+            XCTAssertEqual($0 as? CLIOptionsError, .missingValue(for: "--engine"))
+        }
+    }
+
+    func testRateWithTheSiriEngineIsRejectedRatherThanIgnored() {
+        // The Siri engine has no rate control: dropping --rate silently would
+        // be worse than saying so, and cached chapters could not account for
+        // a rate no option produced.
+        XCTAssertThrowsError(try CLIOptions.parse(["book.epub", "--engine", "siri", "--rate", "0.7"])) {
+            XCTAssertEqual($0 as? CLIOptionsError, .rateUnsupportedByEngine(.siri))
+        }
+        XCTAssertThrowsError(try CLIOptions.parse(["book.epub", "--rate", "0.7", "--engine", "siri"])) {
+            XCTAssertEqual($0 as? CLIOptionsError, .rateUnsupportedByEngine(.siri))
+        }
+    }
+
+    func testRateStillWorksWithThePublicEngine() throws {
+        let options = try CLIOptions.parse(["book.epub", "--engine", "apple", "--rate", "0.7"])
+        XCTAssertEqual(options.rate, 0.7)
+        XCTAssertEqual(options.engine, .apple)
+    }
 }

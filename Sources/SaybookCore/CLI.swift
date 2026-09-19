@@ -58,12 +58,13 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
         }
     }
 
-    // An explicit `--voice` must exist before any work starts: a fast
-    // failure with no Scratch side effects.
+    // An explicit `--voice` must exist in the chosen engine's catalog before
+    // any work starts: a fast failure with no Scratch side effects.
+    let engine = options.engine
     var explicitVoice: Voice?
     if let reference = options.voice {
-        guard let chosen = VoiceSelection.named(reference, in: VoiceCatalog.installed()) else {
-            report("error: Unknown voice: \(reference) (see `say -v ?` for installed voices)")
+        guard let chosen = VoiceSelection.named(reference, in: engine.voices()) else {
+            report("error: Unknown voice for the \(engine.rawValue) engine: \(reference) (\(engine.voiceHint))")
             return 1
         }
         explicitVoice = chosen
@@ -84,20 +85,37 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
             voice = explicitVoice
         } else {
             let language = options.language ?? book.language
-            guard let chosen = VoiceSelection.best(forLanguage: language, in: VoiceCatalog.installed()) else {
-                throw SaybookError(message: "No installed voice for language \"\(language)\"")
+            guard let chosen = VoiceSelection.best(forLanguage: language, in: engine.voices()) else {
+                throw SaybookError(
+                    message: "No installed \(engine.rawValue)-engine voice for language \"\(language)\" (\(engine.voiceHint))"
+                )
             }
             voice = chosen
         }
+        // The engine must be able to render this voice: for the Siri engine
+        // this loads the voice bundle once, so a machine with no Siri voice
+        // (or a macOS that changed the private API) fails here, not halfway
+        // through the first chapter.
+        try engine.validate(voice)
 
         // Cached Chapter CAFs are resume state only for the same options:
-        // a different Voice or Rate clears them (ticket 04).
-        if try Scratch.ensureOptions(Scratch.optionsMarker(voice: voice, rate: options.rate), in: scratchDir) {
-            report("note: voice or rate changed — clearing cached chapters")
+        // a different Engine, Voice or Rate clears them (ticket 04).
+        if try Scratch.ensureOptions(
+            Scratch.optionsMarker(engine: engine, voice: voice, rate: options.rate), in: scratchDir
+        ) {
+            report("note: engine, voice or rate changed — clearing cached chapters")
+        }
+        // The private engine is never a surprise: say which engine is talking,
+        // but only when it is not the default one (the header format is
+        // documented for the Apple engine).
+        if engine != .apple {
+            report("Engine: \(engine.rawValue) (private Siri engine — offline, unsupported)")
         }
         report("Voice: \(voice.name) (\(voice.quality.label), \(voice.language)) · Rate: \(formatRate(options.rate))")
 
-        let (renders, skipped) = try synthesizeChapters(of: book, voice: voice, rate: options.rate, in: scratchDir)
+        let (renders, skipped) = try synthesizeChapters(
+            of: book, voice: voice, rate: options.rate, engine: engine, in: scratchDir
+        )
 
         // A SIGINT during the final fast step: the chapters are done, so
         // report them as such.
@@ -202,10 +220,9 @@ private struct ChapterRender {
 /// reports one progress line per Chapter on stderr. A Chapter whose CAF
 /// already exists in Scratch is skipped (resume: existence = state).
 @MainActor
-private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in scratch: URL) throws -> (renders: [ChapterRender], skipped: Int) {
-    guard let speechVoice = VoiceCatalog.speechVoice(for: voice) else {
-        throw SaybookError(message: "Voice \"\(voice.name)\" is no longer installed")
-    }
+private func synthesizeChapters(
+    of book: Book, voice: Voice, rate: Double, engine: SpeechEngine, in scratch: URL
+) throws -> (renders: [ChapterRender], skipped: Int) {
     try FileManager.default.createDirectory(
         at: Scratch.chaptersDirectory(in: scratch), withIntermediateDirectories: true
     )
@@ -238,8 +255,9 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
                 chapter.blocks,
                 chapterNumber: number,
                 total: book.chapters.count,
-                voice: speechVoice,
+                voice: voice,
                 rate: rate,
+                engine: engine,
                 in: scratch
             )
             let partial = AtomicPublish.partial(for: cafURL)
@@ -265,7 +283,8 @@ private func synthesizeChapters(of book: Book, voice: Voice, rate: Double, in sc
 /// Book's Chapter count, and the interrupted Chapter counts as not completed.
 @MainActor
 private func renderBlocks(
-    _ blocks: [Block], chapterNumber: Int, total: Int, voice: AVSpeechSynthesisVoice, rate: Double, in scratch: URL
+    _ blocks: [Block], chapterNumber: Int, total: Int, voice: Voice, rate: Double, engine: SpeechEngine,
+    in scratch: URL
 ) throws -> [URL] {
     var segments: [URL] = []
     for (offset, block) in blocks.enumerated() {
@@ -277,12 +296,9 @@ private func renderBlocks(
         }
         let cafURL = Scratch.blockCAFURL(in: scratch, index: chapterNumber, block: blockNumber)
         // A killed run may have left a stale file at the final name (same
-        // Voice/Rate: the options marker guards that): AtomicPublish
+        // Engine/Voice/Rate: the options marker guards that): AtomicPublish
         // replaces it before the rename.
-        let utterance = AVSpeechUtterance(string: block.text)
-        utterance.voice = voice
-        utterance.rate = Float(rate)
-        try Synthesis.render(utterance: utterance, to: cafURL)
+        try engine.render(text: block.text, voice: voice, rate: rate, to: cafURL)
         // The Block is the unit of work (ticket 06): a SIGINT arrives
         // during the render and is acted on as soon as this Block is done.
         try ensureNotInterrupted(completed: chapterNumber - 1, total: total)
@@ -327,8 +343,9 @@ private func isDirectory(_ path: String) -> Bool {
     return FileManager.default.fileExists(atPath: path, isDirectory: &flag) && flag.boolValue
 }
 
-/// The v1 flag set (ticket 06 added `-o`, `--force` and `--keep-scratch`).
-private let usageLine = "Usage: saybook <book.epub> [-o OUT.m4b] [--voice NAME] [--rate 0.0–1.0] [--language LL] [--keep-scratch] [--force]"
+/// The flag set (`--engine` added with the Siri engine; ticket 06 added
+/// `-o`, `--force` and `--keep-scratch`).
+private let usageLine = "Usage: saybook <book.epub> [-o OUT.m4b] [--voice NAME] [--rate 0.0–1.0] [--language LL] [--engine apple|siri] [--keep-scratch] [--force]"
 
 /// Readable messages for command-line user errors (exit 1).
 private func reportOptionsError(_ error: CLIOptionsError) {
@@ -345,6 +362,11 @@ private func reportOptionsError(_ error: CLIOptionsError) {
         report("error: Rate must be a number between 0.0 and 1.0: \(value)")
     case let .outOfRangeRate(value):
         report("error: Rate must be between 0.0 and 1.0: \(value)")
+    case let .unknownEngine(value):
+        report("error: Unknown engine: \(value) (expected \(SpeechEngine.allCases.map(\.rawValue).joined(separator: " or ")))")
+        report(usageLine)
+    case let .rateUnsupportedByEngine(engine):
+        report("error: --rate needs the apple engine: --engine \(engine.rawValue) speaks at the voice's own rate")
     }
 }
 

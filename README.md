@@ -1,6 +1,6 @@
 # saybook
 
-`saybook` converts a non-DRM EPUB **Book** into a single audiobook-grade **Audiobook** (M4B): one continuous audio track with Chapter Markers and Book metadata (title, artist, album, cover), spoken by Apple's speech engine entirely offline.
+`saybook` converts a non-DRM EPUB **Book** into a single audiobook-grade **Audiobook** (M4B): one continuous audio track with Chapter Markers and Book metadata (title, artist, album, cover), spoken by Apple's speech engine entirely offline. A second, **opt-in** engine speaks the Book with Apple's private Siri engine — see [The Siri engine](#the-siri-engine-engine-siri).
 
 ```
 $ saybook alice.epub
@@ -29,20 +29,21 @@ swift build -c release
 ## Usage
 
 ```
-saybook <book.epub> [-o out.m4b] [--voice V] [--rate 0.0–1.0] [--language LL] [--keep-scratch] [--force]
+saybook <book.epub> [-o out.m4b] [--voice V] [--rate 0.0–1.0] [--language LL] [--engine apple|siri] [--keep-scratch] [--force]
 ```
 
 | Flag | Meaning |
 | --- | --- |
 | `<book.epub>` | The Book to speak (required). Non-DRM only. |
 | `-o out.m4b` | Write to an explicit path. Default: `<book>.m4b` beside the input. The parent directory must exist. |
-| `--voice V` | Use a specific Voice: a display name or identifier as listed by `say -v ?`. Default: the best installed Voice for the Book's language (premium > enhanced > default). |
-| `--rate 0.0–1.0` | Speech Rate on Apple's scale; `0.5` is normal and the default. |
+| `--voice V` | Use a specific Voice: a display name or identifier as listed by `say -v ?` (or, for `--engine siri`, in its error messages). Default: the best installed Voice for the Book's language (premium > enhanced > default). |
+| `--rate 0.0–1.0` | Speech Rate on Apple's scale; `0.5` is normal and the default. Needs the `apple` engine — the Siri engine speaks at the voice's own rate. |
 | `--language LL` | Pick the Voice for `LL` instead of the Book's declared language (e.g. `--language fr-CA`). |
+| `--engine E` | `apple` (default) is the public `AVSpeechSynthesizer`; `siri` is Apple's private on-device Siri engine, offline and unsupported — [details](#the-siri-engine-engine-siri). |
 | `--keep-scratch` | Keep the Scratch (per-Chapter audio, resume state) after a successful run. |
 | `--force` | Replace an existing output file. Without it, an existing output is refused. |
 
-Progress is reported per Chapter on stderr (`✓ N/M · title · m:ss`, `⏭` for a cached Chapter, `–` for an empty one); the final line summarises chapters, skipped, duration, size and path. Exit codes: `0` success, `1` input/user error (bad EPUB, DRM content, no readable Chapters, no Voice for the language, existing output, interrupted), `2` internal error.
+Progress is reported per Chapter on stderr (`✓ N/M · title · m:ss`, `⏭` for a cached Chapter, `–` for an empty one); the final line summarises chapters, skipped, duration, size and path. A run with a non-default engine says so in its header (`Engine: siri (private Siri engine — offline, unsupported)`). Exit codes: `0` success, `1` input/user error (bad EPUB, DRM content, no readable Chapters, no Voice for the language, existing output, interrupted), `2` internal error.
 
 ### Example
 
@@ -54,7 +55,25 @@ swift build -c release
 
 ### Resume and re-runs
 
-Per-Chapter audio is kept in a per-Book **Scratch** directory (keyed by the Book's path) as resume state. If a run is interrupted (`Ctrl-C` stops it after the current unit of work, keeping its Scratch and reporting progress so far) or fails, **re-running the same command resumes**: finished Chapters are reused, the rest are synthesised. Changing `--voice` or `--rate` clears the Book's Scratch (a different voice/rate cannot reuse previous audio). `--keep-scratch` preserves the Scratch after a successful run.
+Per-Chapter audio is kept in a per-Book **Scratch** directory (keyed by the Book's path) as resume state. If a run is interrupted (`Ctrl-C` stops it after the current unit of work, keeping its Scratch and reporting progress so far) or fails, **re-running the same command resumes**: finished Chapters are reused, the rest are synthesised. Changing `--engine`, `--voice` or `--rate` clears the Book's Scratch (audio rendered by another engine, voice or rate is not resume state for this one). `--keep-scratch` preserves the Scratch after a successful run.
+
+### The Siri engine (`--engine siri`)
+
+```sh
+saybook ~/Books/alice.epub --engine siri --voice Martha
+```
+
+Apple ships a second, better on-device speech engine inside `SiriTTS.framework` — the one Siri and Personal Voice use. It is **private API**: nothing in AVFoundation, `FoundationModels` or `say` reaches it, and the `com.apple.sirittsd` XPC service refuses unentitled clients, so saybook calls its C++ `TTSSynthesizer` directly through a small C bridge (`Sources/SiriTTSBridge`). It stays fully offline and dependency-free, and its audio is resampled into the same 22.05 kHz mono contract as the public engine, so chapters, metadata and resume behave identically.
+
+What to expect:
+
+- **Opt-in only.** The default engine is the public one; a run using the private engine labels itself, and a `--engine siri` run that cannot render fails with a readable error and no output file. It never silently falls back to the other engine — a Book in an unrequested voice is worse than a failed run.
+- **Voices come from macOS.** Siri voice bundles are downloaded by the system into `/System/Library/AssetsV2/com_apple_MobileAsset_UAF_Siri_TextToSpeech`; there is no `say -v ?` for them, so saybook lists the installed ones in its `--voice`/`--language` errors. A Mac with no bundle installed cannot use this engine.
+- **No rate control**, so `--rate` is refused with `--engine siri`.
+- **It can break with any OS update** — the bridge binds C++ symbols by mangled name. Unsupported by design: keep it for personal use, and do not ship the binary to anyone else expecting it to work.
+- `SAYBOOK_SIRI_DIAGNOSTICS=1` leaves Apple's own engine logging on stderr (it is voluminous and normally muted by the bridge, which otherwise risks blocking on a full stderr pipe).
+
+Design and evidence: `docs/adr/0003-private-siri-speech-engine.md`.
 
 ## The Audiobook
 
@@ -70,7 +89,7 @@ Per-Chapter audio is kept in a per-Book **Scratch** directory (keyed by the Book
 swift test
 ```
 
-The suite (136 tests, ~30 s, zero network access) covers the pipeline at its seams: EPUB parsing against in-repo mini-EPUB fixtures (single/multi-chapter, EPUB2 and EPUB3, nav, cover, empty documents, links/footnotes/images, missing author, DRM), per-Block extraction rules, Chapter Marker offset math and `chpl`/`ftyp`/`ilst` box round-trips, Voice selection, and end-to-end runs of the real binary (exit codes, resume, SIGINT, flags). It is green in both the debug and the release configuration (`swift test -c release`) — the release run matters because it is the shipping configuration.
+The suite (160 tests, ~45 s, zero network access) covers the pipeline at its seams: EPUB parsing against in-repo mini-EPUB fixtures (single/multi-chapter, EPUB2 and EPUB3, nav, cover, empty documents, links/footnotes/images, missing author, DRM), per-Block extraction rules, Chapter Marker offset math and `chpl`/`ftyp`/`ilst` box round-trips, Voice selection, the speech **Engine** seam (voice-bundle parsing, an unusable engine reporting itself as a user error, and a real render through the private engine when the Mac has a Siri voice bundle — those tests skip when it does not), and end-to-end runs of the real binary (exit codes, resume, engine switching, SIGINT, flags). It is green in both the debug and the release configuration (`swift test -c release`) — the release run matters because it is the shipping configuration.
 
 ### Manual E2E
 
@@ -89,13 +108,15 @@ Asserted: the M4B brand, a decodable duration (both tools agree), one Chapter Ma
 - **One Book per run** — the whole Book is one Audiobook file; there is no per-Chapter Audiobook.
 - **Fixed ~34 kb/s bitrate** — the `AVAssetExportSession` preset's; not a tunable in v1.
 - **Apple system Voices only** — quality depends on what the machine has installed (English: premium/enhanced voices are best; exotic languages may only have default-quality Voices, or none, in which case the run fails naming the language).
+- **The private Siri engine is unsupported** — `--engine siri` is opt-in, needs a macOS-delivered Siri voice bundle, has no rate control, and can stop working with any OS update; the public engine is the supported path.
 - **No loudness normalisation** — chapters keep the voice's natural level.
 - **Local use** — v1 is a command-line tool (`swift build -c release`), not a signed app.
 
 ## Layout
 
-- `Sources/SaybookCore` — the pipeline: `Epub` (parse), `Block`/extraction (text), `Synthesis` (speech), `Assemble`/`Encode` (audio), `Brand`/`ChapterMarkers`/`Metadata`/`Mp4` (M4B finalisation), `Voice`, `CLI`/`CLIOptions`, `Scratch`, `Signals`.
+- `Sources/SaybookCore` — the pipeline: `Epub` (parse), `Block`/extraction (text), `Synthesis`/`SpeechEngine`/`SiriSynthesis` (speech), `Assemble`/`Encode` (audio), `Brand`/`ChapterMarkers`/`Metadata`/`Mp4` (M4B finalisation), `Voice`, `CLI`/`CLIOptions`, `Scratch`, `Signals`.
+- `Sources/SiriTTSBridge` — the C bridge to the private `SiriTTS.framework` engine (every private symbol reference lives here).
 - `Sources/saybook` — the executable entry point.
 - `Tests/SaybookTests` — unit + executable-level tests, with mini-EPUB fixtures under `Fixtures/`.
 - `Scripts/e2e.sh` — the manual E2E.
-- `CONTEXT.md` — domain vocabulary; `docs/adr/` — architecture decisions (offline synthesis, hand-rolled M4B).
+- `CONTEXT.md` — domain vocabulary; `docs/adr/` — architecture decisions (offline synthesis, hand-rolled M4B, the private Siri engine).

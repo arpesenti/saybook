@@ -1,7 +1,7 @@
 import Foundation
 
 /// The parsed command line:
-/// `saybook <book.epub> [-o OUT.m4b] [--voice NAME] [--rate 0.0–1.0] [--language LL] [--keep-scratch] [--force]`.
+/// `saybook <book.epub> [-o OUT.m4b] [--voice NAME] [--rate 0.0–1.0] [--language LL] [--engine apple|siri] [--keep-scratch] [--force]`.
 public struct CLIOptions: Equatable {
     /// The input Book's path.
     public let inputPath: String
@@ -16,6 +16,9 @@ public struct CLIOptions: Equatable {
     /// A `--language` override for voice selection; nil uses the Book's OPF
     /// language.
     public let language: String?
+    /// The speech **Engine** to render with (`--engine`): `apple` (the
+    /// public `AVSpeechSynthesizer` engine) unless another is named.
+    public let engine: SpeechEngine
     /// Replace an existing output file (`--force`); without it an existing
     /// output is refused (exit 1).
     public let force: Bool
@@ -40,6 +43,10 @@ public enum CLIOptionsError: Error, Equatable {
     case invalidRate(String)
     /// `--rate` is a number outside 0.0–1.0.
     case outOfRangeRate(String)
+    /// `--engine` names an engine that does not exist.
+    case unknownEngine(String)
+    /// `--rate` given with an engine that cannot honour it (`--engine siri`).
+    case rateUnsupportedByEngine(SpeechEngine)
 }
 
 public extension CLIOptions {
@@ -52,13 +59,15 @@ public extension CLIOptions {
         var voice: String?
         var rate = CLIOptions.defaultRate
         var language: String?
+        var engine = SpeechEngine.apple
+        var rateGiven = false
         var force = false
         var keepScratch = false
         var index = 0
         while index < arguments.count {
             let arg = arguments[index]
             switch arg {
-            case "--voice", "--rate", "--language", "-o":
+            case "--voice", "--rate", "--language", "--engine", "-o":
                 index += 1
                 guard index < arguments.count else {
                     throw CLIOptionsError.missingValue(for: arg)
@@ -77,12 +86,18 @@ public extension CLIOptions {
                     voice = value
                 case "--language":
                     language = value
+                case "--engine":
+                    guard let parsed = SpeechEngine.named(value) else {
+                        throw CLIOptionsError.unknownEngine(value)
+                    }
+                    engine = parsed
                 case "-o":
                     outputPath = value
                 case "--rate":
                     guard let parsed = Double(value) else { throw CLIOptionsError.invalidRate(value) }
                     guard (0.0...1.0).contains(parsed) else { throw CLIOptionsError.outOfRangeRate(value) }
                     rate = parsed
+                    rateGiven = true
                 default:
                     break
                 }
@@ -99,12 +114,19 @@ public extension CLIOptions {
             index += 1
         }
         guard let inputPath else { throw CLIOptionsError.usage }
+        // An engine that cannot speak at a requested rate must say so rather
+        // than ignore the flag: a silently dropped --rate would also leave
+        // cached chapters that no option can account for.
+        if engine == .siri, rateGiven {
+            throw CLIOptionsError.rateUnsupportedByEngine(engine)
+        }
         return CLIOptions(
             inputPath: inputPath,
             outputPath: outputPath,
             voice: voice,
             rate: rate,
             language: language,
+            engine: engine,
             force: force,
             keepScratch: keepScratch
         )

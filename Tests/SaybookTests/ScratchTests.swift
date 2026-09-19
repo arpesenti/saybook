@@ -3,15 +3,17 @@ import XCTest
 @testable import SaybookCore
 
 /// Ticket 04: Scratch options marker — cached Chapter CAFs are only resume
-/// state when the run's Voice and Rate match the marker the previous run
-/// wrote; a different voice or rate clears them.
+/// state when the run's Engine, Voice and Rate match the marker the previous
+/// run wrote; a different engine, voice or rate clears them.
 final class ScratchTests: XCTestCase {
 
-    private func marker(voice: Voice? = nil, rate: Double = 0.5) -> String {
+    private func marker(
+        voice: Voice? = nil, rate: Double = 0.5, engine: SpeechEngine = .apple
+    ) -> String {
         let voice = voice ?? Voice(
             identifier: "com.apple.test.Plain", name: "Plain", language: "en-US", quality: .enhanced
         )
-        return Scratch.optionsMarker(voice: voice, rate: rate)
+        return Scratch.optionsMarker(engine: engine, voice: voice, rate: rate)
     }
 
     private func seedChapterCAF(in scratch: URL) throws {
@@ -48,6 +50,20 @@ final class ScratchTests: XCTestCase {
         XCTAssertTrue(cleared)
         XCTAssertFalse(FileManager.default.fileExists(atPath: Scratch.chapterCAFURL(in: scratch, index: 1).path))
         XCTAssertEqual(try String(contentsOf: Scratch.optionsURL(in: scratch), encoding: .utf8), marker(rate: 0.9))
+    }
+
+    func testChangedEngineClearsCachedChapters() throws {
+        // Audio rendered by one engine is never resume state for another:
+        // they are different voices at different sample rates.
+        let scratch = try makeTempDir()
+        try Scratch.ensureOptions(marker(), in: scratch)
+        try seedChapterCAF(in: scratch)
+
+        let cleared = try Scratch.ensureOptions(marker(engine: .siri), in: scratch)
+
+        XCTAssertTrue(cleared)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: Scratch.chapterCAFURL(in: scratch, index: 1).path))
+        XCTAssertTrue(marker(engine: .siri).contains("engine=siri"))
     }
 
     func testChangedVoiceClearsCachedChapters() throws {

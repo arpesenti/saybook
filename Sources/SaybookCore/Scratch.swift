@@ -12,8 +12,8 @@ public enum Scratch {
     ///
     /// Run options are tracked separately: the options marker
     /// (`ensureOptions`) must match for cached CAFs to be resume state, so
-    /// a re-run with a different `--voice` or `--rate` never replays audio
-    /// synthesised with other options.
+    /// a re-run with a different `--engine`, `--voice` or `--rate` never
+    /// replays audio synthesised with other options.
     public static func directory(for book: URL) throws -> URL {
         let attributes = try FileManager.default.attributesOfItem(atPath: book.path)
         let size = (attributes[.size] as? Int) ?? 0
@@ -29,16 +29,17 @@ public enum Scratch {
         scratch.appendingPathComponent("options")
     }
 
-    /// The options marker for a run: the resolved Voice's identifier and the
-    /// Rate its Chapter CAFs were (or will be) synthesised with.
-    public static func optionsMarker(voice: Voice, rate: Double) -> String {
-        String(format: "voice=%@\nrate=%g", voice.identifier, rate)
+    /// The options marker for a run: the **Engine**, the resolved Voice's
+    /// identifier, and the Rate its Chapter CAFs were (or will be)
+    /// synthesised with.
+    public static func optionsMarker(engine: SpeechEngine, voice: Voice, rate: Double) -> String {
+        String(format: "engine=%@\nvoice=%@\nrate=%g", engine.rawValue, voice.identifier, rate)
     }
 
     /// Ensures Scratch's options marker matches `marker`. A matching marker
     /// keeps the cached Chapter CAFs (resume state); a different or missing
-    /// marker clears the cached Chapters — a different voice or rate (or an
-    /// unknown origin) must not replay cached audio. Returns true when
+    /// marker clears the cached Chapters — a different engine, voice or rate
+    /// (or an unknown origin) must not replay cached audio. Returns true when
     /// cached Chapters were cleared (the unpacked EPUB and the marker file
     /// itself are not cached audio and are never touched).
     @discardableResult
