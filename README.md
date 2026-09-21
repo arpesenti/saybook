@@ -70,6 +70,7 @@ What to expect:
 - **Opt-in only.** The default engine is the public one; a run using the private engine labels itself, and a `--engine siri` run that cannot render fails with a readable error and no output file. It never silently falls back to the other engine — a Book in an unrequested voice is worse than a failed run.
 - **Voices come from macOS.** Siri voice bundles are downloaded by the system into `/System/Library/AssetsV2/com_apple_MobileAsset_UAF_Siri_TextToSpeech`; there is no `say -v ?` for them, so saybook lists the installed ones in its `--voice`/`--language` errors. A Mac with no bundle installed cannot use this engine.
 - **No rate control**, so `--rate` is refused with `--engine siri`.
+- **It costs more.** Measured on the same Book (2:16 of audio, release binary, M4): `--engine siri` takes **16.8 s and ~400 MB peak** against the public engine's **3.2 s and ~98 MB** — ~8× realtime versus ~40×. A 10-hour Book renders in roughly **1¼ hours** instead of ~15 minutes; the one-off voice load is under a second, so the cost is render throughput plus the neural models held resident. Better voice, slower run: know which you are buying.
 - **It can break with any OS update** — the bridge binds C++ symbols by mangled name. Unsupported by design: keep it for personal use, and do not ship the binary to anyone else expecting it to work.
 - `SAYBOOK_SIRI_DIAGNOSTICS=1` leaves Apple's own engine logging on stderr (it is voluminous and normally muted by the bridge, which otherwise risks blocking on a full stderr pipe).
 
@@ -108,7 +109,7 @@ Asserted: the M4B brand, a decodable duration (both tools agree), one Chapter Ma
 - **One Book per run** — the whole Book is one Audiobook file; there is no per-Chapter Audiobook.
 - **Fixed ~34 kb/s bitrate** — the `AVAssetExportSession` preset's; not a tunable in v1.
 - **Apple system Voices only** — quality depends on what the machine has installed (English: premium/enhanced voices are best; exotic languages may only have default-quality Voices, or none, in which case the run fails naming the language).
-- **The private Siri engine is unsupported** — `--engine siri` is opt-in, needs a macOS-delivered Siri voice bundle, has no rate control, and can stop working with any OS update; the public engine is the supported path.
+- **The private Siri engine is unsupported** — `--engine siri` is opt-in, needs a macOS-delivered Siri voice bundle, has no rate control, renders ~5× slower than the public engine, and can stop working with any OS update; the public engine is the supported path.
 - **No loudness normalisation** — chapters keep the voice's natural level.
 - **Local use** — v1 is a command-line tool (`swift build -c release`), not a signed app.
 
