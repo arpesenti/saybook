@@ -90,6 +90,80 @@ func decodeToFloatPCM(_ input: URL, at output: URL) throws {
     XCTAssertEqual(exit, 0, "ffmpeg decode failed: \(stderr)")
 }
 
+/// A maximal run of near-silent 10 ms windows inside decoded audio: a
+/// candidate inter-Block pause (see `interiorSilentRuns`).
+struct SilentRun {
+    /// The run's first sample.
+    let start: Int
+    /// The first sample after the run.
+    let end: Int
+    let duration: TimeInterval
+
+    init(start: Int, end: Int, sampleRate: Int) {
+        self.start = start
+        self.end = end
+        self.duration = Double(end - start) / Double(sampleRate)
+    }
+}
+
+/// The maximal runs of `pcm` (Float32 little-endian mono at `sampleRate`) that
+/// read as inter-Block pauses: at least `minimum` and at most `maximum` seconds
+/// of near-silence, **bounded by speech on both sides**.
+///
+/// Both halves of that guard matter. A Chapter's Block CAFs each end in the
+/// engine's own edge silence (measured 0.21–0.22 s per side on macOS 27), which
+/// is long enough to clear a 0.2 s floor on its own, and the last Block's edge
+/// silence runs to the end of the file — so "a long silence somewhere inside the
+/// audio" is not by itself a pause between Blocks:
+///
+/// - every window of the file is tested, the ragged final one included, so a
+///   silent run that reaches the end of the file *ends* at the end of the file
+///   and is recognised as an edge rather than counted as an interior pause;
+/// - a window at the noise floor (a codec's tail material, a dither bed) is
+///   above the silence floor without being speech, so the run must have a
+///   genuinely speech-loud window within 0.5 s on each side.
+func interiorSilentRuns(in pcm: Data, sampleRate: Int, minimum: TimeInterval, maximum: TimeInterval) -> [SilentRun] {
+    let window = max(1, sampleRate / 100)   // 10 ms
+    let silenceFloor: Float = 0.01
+    let speechFloor: Float = 0.05
+    let speechReach = max(1, Int(0.5 * Double(sampleRate)) / window)
+    let totalFrames = pcm.count / 4
+    let windowCount = (totalFrames + window - 1) / window
+
+    // One pass over the windows: a window is silent below `silenceFloor`, and
+    // is loud (speech) at or above `speechFloor`. `rms` clamps to the file, so
+    // the final partial window is measured over the frames that exist.
+    var silent = [Bool](repeating: false, count: windowCount)
+    var loud = [Bool](repeating: false, count: windowCount)
+    for index in 0..<windowCount {
+        let level = rms(of: pcm, from: index * window, count: window)
+        silent[index] = level < silenceFloor
+        loud[index] = level >= speechFloor
+    }
+
+    var runs: [SilentRun] = []
+    var index = 0
+    while index < windowCount {
+        guard silent[index] else {
+            index += 1
+            continue
+        }
+        var last = index
+        while last + 1 < windowCount, silent[last + 1] { last += 1 }
+        let start = index * window
+        let end = min((last + 1) * window, totalFrames)
+        let run = SilentRun(start: start, end: end, sampleRate: sampleRate)
+        let speechBefore = (max(0, index - speechReach)..<index).contains(where: { loud[$0] })
+        let speechAfter = ((last + 1)..<min(windowCount, last + 1 + speechReach)).contains(where: { loud[$0] })
+        if start > 0, end < totalFrames, run.duration >= minimum, run.duration <= maximum,
+           speechBefore, speechAfter {
+            runs.append(run)
+        }
+        index = last + 1
+    }
+    return runs
+}
+
 /// Root-mean-square amplitude of `count` samples starting at `sample`
 /// in a Float32 little-endian PCM file.
 func rms(of data: Data, from sample: Int, count: Int) -> Float {

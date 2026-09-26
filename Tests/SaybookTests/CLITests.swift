@@ -168,52 +168,87 @@ final class CLITests: XCTestCase {
 
     func testBlocksAreSeparatedByAudiblePauses() throws {
         // Ticket 05: the single-chapter fixture has 3 Blocks (heading + two
-        // paragraphs), so the output carries exactly two inter-Block pauses
-        // — each 0.3 s of digital silence plus the engine's own edge silence,
-        // a near-silent run of 0.2–0.5 s (the ticket's audible window) inside
-        // the audio. Natural inter-word pauses are far shorter (<0.1 s) and
-        // never touch a whole 0.2 s window run.
+        // paragraphs), so the Audiobook carries exactly two injected 0.3 s
+        // inter-Block pauses, and nothing else that could pass for one.
+        //
+        // Measured on macOS 27.0 (26A428) with the fixture's default Voice,
+        // Daniel (enhanced, en-GB), rate 0.5: the two boundary silences are
+        // 0.53 and 0.55 s long — the injected 0.3 s plus the engine's own edge
+        // silence, measured 0.21–0.22 s at each Block edge — and the longest
+        // natural inter-word gap is 0.06 s. On macOS 26 the same two boundaries
+        // measured 0.36–0.46 s. Those numbers document what was measured; none
+        // of them is an expectation here, because the engine's edge silence is
+        // what drifts with the OS and Voice, and it is already long enough to
+        // clear ticket 05's 0.2 s audible floor on its own. So this test does
+        // not try to tell a pause from engine silence by length alone: it pins
+        // the pauses to the positions the engine's own per-Block CAFs predict,
+        // and counts a silence as a pause only when speech bounds it on both
+        // sides (`interiorSilentRuns`: the last Block's trailing edge silence
+        // runs to the end of the file and measures 0.22 s on macOS 27).
         let dir = try makeTempDir()
         let input = dir.appendingPathComponent("book.epub")
         try FileManager.default.copyItem(
             at: fixturesDir.appendingPathComponent("single-chapter.epub"), to: input
         )
-        let result = try run([input.path])
+        let result = try run([input.path, "--keep-scratch"])
         XCTAssertEqual(result.exit, 0, "stderr: \(result.stderr)")
+        let scratch = try Scratch.directory(for: input)
+        addTeardownBlock { try? FileManager.default.removeItem(at: scratch) }
+
+        // The Chapter CAF is the concatenation [block 1, pause, block 2,
+        // pause, block 3], so where each pause sits follows from the Block
+        // CAF frame counts the engine just wrote (which track the engine's
+        // timing whatever it is) and from ticket 05's ~0.3 s pause — written
+        // here as the spec's own number rather than read back from
+        // `Synthesis.blockPauseDuration`, so a build that drops or shrinks the
+        // injected silence moves the audio out from under this expectation
+        // instead of moving the expectation along with it.
+        let blockCount = 3
+        let injectedFrames = Int((0.3 * Synthesis.sampleRate).rounded())
+        let blockFrames = try (1...blockCount)
+            .map { try cafFrameCount(at: Scratch.blockCAFURL(in: scratch, index: 1, block: $0)) }
+        var expectedPauses: [Range<Int>] = []
+        var cursor = 0
+        for (offset, frames) in blockFrames.enumerated() {
+            if offset > 0 {
+                expectedPauses.append(cursor ..< cursor + injectedFrames)
+                cursor += injectedFrames
+            }
+            cursor += frames
+        }
 
         let raw = dir.appendingPathComponent("raw.f32")
         try decodeToFloatPCM(dir.appendingPathComponent("book.m4b"), at: raw)
         let pcm = try Data(contentsOf: raw)
-
-        // 10 ms windows; a window below the speech RMS floor counts as
-        // silent. Maximal silent runs bounded by speech on both sides (not
-        // touching the file edges) and inside the 0.2–0.8 s window are the
-        // inter-Block pauses: the injected 0.3 s (the ticket's 0.2–0.5 s
-        // audible window) plus the engine's edge silence — measured 0.36–
-        // 0.46 s on macOS 26, so 0.8 s is headroom, not a widening of the
-        // spec window. Natural inter-word pauses are far shorter (<0.1 s).
-        let sampleRate = 22_050
-        let window = sampleRate / 100
+        let sampleRate = Int(Synthesis.sampleRate)
         let totalFrames = pcm.count / 4
-        var runs: [TimeInterval] = []
-        var offset = 0
-        while offset + window <= totalFrames {
-            if rms(of: pcm, from: offset, count: window) < 0.01 {
-                var end = offset
-                while end + window <= totalFrames, rms(of: pcm, from: end, count: window) < 0.01 {
-                    end += window
-                }
-                if offset > 0, end < totalFrames,
-                   end - offset >= sampleRate / 5, end - offset <= sampleRate * 4 / 5  // 0.2–0.8 s
-                {
-                    runs.append(TimeInterval(end - offset) / Double(sampleRate))
-                }
-                offset = end
-            } else {
-                offset += window
+        // The decoded Audiobook is those segments end to end, to within AAC's
+        // frame padding (1024 samples = 46 ms).
+        XCTAssertEqual(Double(totalFrames), Double(cursor), accuracy: 0.1 * Synthesis.sampleRate,
+                       "\(blockFrames) + \(blockCount - 1) x \(injectedFrames) pauses vs \(totalFrames) decoded frames")
+
+        let runs = interiorSilentRuns(in: pcm, sampleRate: sampleRate, minimum: 0.2, maximum: 1.5)
+        let measured = runs.map { String(format: "%.2fs @ %.2fs", $0.duration, Double($0.start) / Synthesis.sampleRate) }
+        XCTAssertEqual(runs.count, blockCount - 1, "one inter-Block pause per Block boundary, got: \(measured)")
+
+        // Each expected pause is there, is audible, and is what makes the
+        // silence at that boundary. The window is inset 50 ms at each end to
+        // absorb decoder priming (the measured alignment is exact), which still
+        // leaves 0.2 s of the injected pause under the silence assertion.
+        let inset = Int((0.05 * Synthesis.sampleRate).rounded())
+        for (index, pause) in expectedPauses.enumerated() {
+            let core = (pause.lowerBound + inset) ..< (pause.upperBound - inset)
+            let level = rms(of: pcm, from: core.lowerBound, count: core.count)
+            XCTAssertLessThan(level, 0.01,
+                              "pause \(index + 1) (expected at \(String(format: "%.2fs", Double(pause.lowerBound) / Synthesis.sampleRate))) is not silent: rms \(level)")
+            guard let covering = runs.first(where: { $0.start <= core.lowerBound && $0.end >= core.upperBound }) else {
+                XCTFail("no counted pause covers Block boundary \(index + 1): \(measured)")
+                continue
             }
+            XCTAssertGreaterThanOrEqual(
+                covering.duration, Double(injectedFrames) / Synthesis.sampleRate - 0.02,
+                "the pause at Block boundary \(index + 1) is shorter than the injected 0.3 s: \(covering.duration)")
         }
-        XCTAssertEqual(runs.count, 2, "two inter-Block pauses, got: \(runs.map { String(format: "%.2f", $0) })")
     }
 
     func testResumeSkipsExistingChapters() throws {
