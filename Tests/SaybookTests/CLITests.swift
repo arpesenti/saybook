@@ -12,13 +12,21 @@ final class CLITests: XCTestCase {
         packageRoot.appendingPathComponent(".build/debug/saybook")
     }
 
-    private func run(_ args: [String]) throws -> (exit: Int32, stdout: String, stderr: String) {
+    private func run(
+        _ args: [String],
+        environment: [String: String]? = nil
+    ) throws -> (exit: Int32, stdout: String, stderr: String) {
         guard FileManager.default.isExecutableFile(atPath: binary.path) else {
             throw XCTSkip("saybook binary not built (run `swift build` first)")
         }
         let process = Process()
         process.executableURL = binary
         process.arguments = args
+        if let environment {
+            var inherited = ProcessInfo.processInfo.environment
+            for (key, value) in environment { inherited[key] = value }
+            process.environment = inherited
+        }
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
@@ -1076,15 +1084,28 @@ final class CLITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: input.deletingPathExtension().appendingPathExtension("m4b").path))
     }
 
+    /// The "no Siri voice bundle" failure is a contract, not a coincidence:
+    /// `Scripts/e2e.sh` decides whether its Siri leg can run at all by looking
+    /// for this exact phrase in the binary's stderr, so it is asserted here —
+    /// with the voice catalog pointed at an empty root
+    /// (`SAYBOOK_SIRI_ASSETS_ROOT`, see `SiriVoiceCatalog.assetsRoot`) rather
+    /// than skipped on a Mac that happens to have a bundle. `Scripts/e2e.sh`
+    /// probes with `--voice __no_such_voice__`, which reports the same hint.
     func testSiriEngineWithoutAVoiceFailsAsAUserError() throws {
-        guard SpeechEngine.siri.voices().isEmpty else {
-            throw XCTSkip("this Mac has a Siri voice bundle, so the missing-voice path cannot be exercised")
-        }
         let dir = try makeTempDir()
+        let emptyCatalog = dir.appendingPathComponent("no-siri-voices")
+        try FileManager.default.createDirectory(at: emptyCatalog, withIntermediateDirectories: true)
         let input = try singleChapterBook(in: dir)
-        let result = try run([input.path, "--engine", "siri"])
+        let result = try run(
+            [input.path, "--engine", "siri"],
+            environment: ["SAYBOOK_SIRI_ASSETS_ROOT": emptyCatalog.path]
+        )
 
         XCTAssertEqual(result.exit, 1, "stderr: \(result.stderr)")
+        XCTAssertTrue(
+            result.stderr.contains("no Siri voice bundle is installed"),
+            "the E2E skip keys on this phrase — stderr: \(result.stderr)"
+        )
         XCTAssertTrue(result.stderr.lowercased().contains("siri"), "stderr: \(result.stderr)")
         XCTAssertFalse(FileManager.default.fileExists(atPath: input.deletingPathExtension().appendingPathExtension("m4b").path))
     }

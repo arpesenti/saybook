@@ -184,8 +184,16 @@ public enum SiriSynthesis {
 public enum SiriVoiceCatalog {
 
     /// Where macOS keeps the Siri text-to-speech voice bundles.
-    static let assetsRoot =
-        "/System/Library/AssetsV2/com_apple_MobileAsset_UAF_Siri_TextToSpeech/purpose_auto"
+    ///
+    /// `SAYBOOK_SIRI_ASSETS_ROOT` overrides it — the same kind of debugging
+    /// hook as `SAYBOOK_SIRI_DIAGNOSTICS` — so the "this Mac has no Siri voice
+    /// bundle" path is reachable on a Mac that has one: point it at an empty
+    /// directory and the catalog reports no voices. `Scripts/e2e.sh` uses that
+    /// to prove its Siri leg skips rather than fails, and `CLITests` uses it to
+    /// assert the message the script's skip keys on. Read once per process.
+    static let assetsRoot: String =
+        ProcessInfo.processInfo.environment["SAYBOOK_SIRI_ASSETS_ROOT"]
+        ?? "/System/Library/AssetsV2/com_apple_MobileAsset_UAF_Siri_TextToSpeech/purpose_auto"
 
     /// The file that distinguishes a synthesizable voice bundle from a
     /// resources-only asset: the engine's pipeline description.
