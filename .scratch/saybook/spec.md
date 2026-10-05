@@ -41,7 +41,7 @@ saybook <book.epub> [-o out.m4b] [--voice V] [--rate 0.0–1.0] [--language LL] 
 
 ## References
 
-- Glossary: `CONTEXT.md` (Book, Spine, Chapter, Block, Audiobook, Chapter Marker, Voice, Rate, Synthesis, Scratch)
+- Glossary: `GLOSSARY.md` (formerly `CONTEXT.md`) (Book, Spine, Chapter, Block, Audiobook, Chapter Marker, Voice, Rate, Synthesis, Scratch)
 - `docs/adr/0001-offline-synthesis-via-avspeechsynthesizer-write.md`
 - `docs/adr/0002-single-m4b-hand-rolled-mp4.md`
 - Verified pipeline probe (measured on macOS 26.6.2, Swift 6.3.3, 2026-09-11): `prototype/verified-pipeline.swift` in this directory

@@ -120,4 +120,4 @@ Asserted: the M4B brand, a decodable duration (both tools agree), one Chapter Ma
 - `Sources/saybook` — the executable entry point.
 - `Tests/SaybookTests` — unit + executable-level tests, with mini-EPUB fixtures under `Fixtures/`.
 - `Scripts/e2e.sh` — the manual E2E.
-- `CONTEXT.md` — domain vocabulary; `docs/adr/` — architecture decisions (offline synthesis, hand-rolled M4B, the private Siri engine).
+- `GLOSSARY.md` — domain vocabulary; `docs/adr/` — architecture decisions (offline synthesis, hand-rolled M4B, the private Siri engine).
