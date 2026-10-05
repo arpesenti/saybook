@@ -17,12 +17,15 @@
 #   2. the private Siri engine (`--engine siri`) on a small in-repo Book
 #      (Tests/SaybookTests/Fixtures/multi-chapter.epub, ~2:10 of audio), so the
 #      *release* binary is exercised through SiriTTSBridge with real Chapter
-#      boundaries — the configuration no test in the project runs. Cost: ~20 s,
-#      plus ~3 s for the Apple-engine render of the same fixture that the
-#      cross-engine duration check compares against. `--siri-full` renders the
-#      Book itself instead of the fixture (~20 min for Alice, because the Siri
-#      engine runs at ~8× realtime against the Apple engine's ~40×) and drops
-#      that extra render, since leg 1 already produced the reference duration.
+#      boundaries — the configuration no test in the project runs. Cost: ~33 s
+#      measured (38.6 s with the leg, 6.0 s with it skipped, release build
+#      cached): the Siri render of the fixture's ~2:10 at ~8× realtime is the
+#      bulk of it, plus ~3 s for the Apple-engine render of the same fixture
+#      that the cross-engine duration check compares against. `--siri-full`
+#      renders the Book itself instead of the fixture and drops that extra
+#      render, since leg 1 already produced the reference duration — for Alice
+#      that is ~20 min, extrapolated from the same ~8× against her ~163 min of
+#      audio (not measured end to end).
 #
 # What each leg asserts:
 #   • brand      — afinfo's file type ID is `m4bf` and ffprobe's

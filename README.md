@@ -94,14 +94,20 @@ The suite (167 tests, ~45 s, zero network access) covers the pipeline at its sea
 
 ### Manual E2E
 
-One command, no fixtures: build the release configuration, run the real binary on a real Book, and assert the Audiobook with independent tools (`afinfo`, `ffprobe` — the latter via `brew install ffmpeg`):
+One command, no fixtures: build the release configuration, run the real binary, and assert the Audiobook with independent tools (`afinfo`, `ffprobe` — the latter via `brew install ffmpeg`):
 
 ```sh
-./Scripts/e2e.sh                       # downloads Project Gutenberg #11 (Alice, ~3 min of synthesis)
-./Scripts/e2e.sh ~/Books/alice.epub    # or a local Book (fully offline)
+./Scripts/e2e.sh                                # downloads Project Gutenberg #11 (Alice, ~3 min of synthesis)
+./Scripts/e2e.sh ~/Books/alice.epub             # or a local Book (fully offline)
+./Scripts/e2e.sh --siri-full ~/Books/alice.epub # also render the Book itself through the private engine (slow)
 ```
 
-Asserted: the M4B brand, a decodable duration (both tools agree), one Chapter Marker per non-empty Chapter with the first at 0:00 and every marker titled, and title/artist metadata matching the Book's OPF.
+Two legs, the same four assertions each: the M4B brand, a decodable duration (both tools agree), one Chapter Marker per non-empty Chapter with the first at 0:00 and every marker titled, and title/artist metadata matching the Book's OPF.
+
+1. **The Book, default engine** — the leg ticket 07 shipped, unchanged.
+2. **A small in-repo Book (the multi-chapter fixture), private engine** (`--engine siri`) — the configuration no test runs, because the CLI suite shells out to the debug binary and `swift test -c release` still executes it. ~33 s on top of leg 1. Two assertions of its own, because both fail silently otherwise: the run must announce `Engine: siri` (an ignored `--engine` would otherwise look exactly like a green default-engine run), and its decoded duration must land within 25 % of the default engine's on the same Book (a sample-rate mistake is a 2× gap). `--siri-full` renders the Book itself instead of the fixture — ~20 min for Alice, since the private engine renders at ~8× realtime against the public engine's ~40×.
+
+The Siri leg **skips** — loudly, and still exiting 0 — on a Mac with no Siri voice bundle: macOS decides which machines have one, and a missing bundle is not a saybook defect. Anything else (a bundle that cannot render, an ignored flag, a bad Audiobook) is a FAIL. `SAYBOOK_SIRI_ASSETS_ROOT=/nonexistent` forces the skip on a Mac that does have a bundle.
 
 ## Limitations (v1)
 
