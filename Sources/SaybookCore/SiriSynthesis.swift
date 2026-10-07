@@ -111,20 +111,31 @@ public enum SiriSynthesis {
         // The one-shot `convert(to:from:)` rejects sample-rate conversion
         // with paramErr, so feed the converter through its input block: the
         // whole render in one buffer, then end of stream.
+        //
+        // This call is *not* throwing in Swift: it returns an output status and
+        // takes an `NSErrorPointer`. A `try`/`catch` here compiled but was dead
+        // code — the compiler's "no calls to throwing functions" warning — and
+        // `error: nil` threw the reason away, so a failed conversion was
+        // reported later as a frame-count mismatch (or not at all). Read the
+        // status and the error, which is what the code always meant.
         var handedOver = false
-        do {
-            try converter.convert(to: output, error: nil) { _, inputStatus in
-                if handedOver {
-                    inputStatus.pointee = .endOfStream
-                    return nil
-                }
-                handedOver = true
-                inputStatus.pointee = .haveData
-                return input
+        var conversionError: NSError?
+        let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+            if handedOver {
+                inputStatus.pointee = .endOfStream
+                return nil
             }
-        } catch {
+            handedOver = true
+            inputStatus.pointee = .haveData
+            return input
+        }
+        // Only `.error` is an error: hitting end of stream is how this call
+        // finishes with a finite input, and the frame-count guards below judge
+        // the result either way.
+        guard status != .error else {
             throw SiriError.message(
-                "could not convert the Siri audio to \(Int(Synthesis.sampleRate)) Hz: \(error)"
+                "could not convert the Siri audio to \(Int(Synthesis.sampleRate)) Hz: "
+                    + (conversionError?.localizedDescription ?? "the converter reported an error")
             )
         }
         let produced = Int(output.frameLength)
