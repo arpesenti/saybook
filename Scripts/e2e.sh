@@ -10,7 +10,7 @@
 # offline.
 #
 # Builds the release configuration, runs the real binary, and asserts the
-# Audiobook with independent tools. Two legs, the same four assertions each:
+# Audiobook with independent tools. Two legs, the same five assertions each:
 #
 #   1. the default (Apple) engine on the Book — unchanged from ticket 07.
 #      Cost: the Book (~3 min of synthesis for Alice).
@@ -35,6 +35,12 @@
 #   • markers    — ffprobe reads one chapter per non-empty Chapter
 #                  (saybook's own summary: Chapters − Skipped), the first at
 #                  0:00, every chapter titled
+#   • markers(2)  — AVFoundation reads the same chapters, via the same
+#                  `loadChapterMetadataGroups` call Books/VoiceOver/QuickTime
+#                  use. Both are needed: ffprobe reads the `chpl` box and Apple's
+#                  players ignore it, so a `chpl`-only file passed every
+#                  assertion here and showed no chapters in the app (ticket 12).
+#                  The probe is Scripts/apple-chapters.swift.
 #   • metadata   — ffprobe's title/artist match the Book's OPF
 #                  (`dc:title`, `dc:creator`; "Unknown" when absent)
 #
@@ -117,6 +123,18 @@ if [ -n "${SAYBOOK_E2E_BIN:-}" ]; then
   echo "note: running SAYBOOK_E2E_BIN=$BIN instead of .build/release/saybook —"
   echo "      this exercises this script's assertions, NOT the release binary"
 fi
+
+# --- the AVFoundation chapter probe ------------------------------------------
+# Compiled rather than shipped as a binary: it exists so this script reads its
+# own output the way a player does, and it must exercise the same AVFoundation
+# the release binary's output will meet at runtime.
+PROBE_SRC="$ROOT/Scripts/apple-chapters.swift"
+PROBE="$WORK/apple-chapters"
+[ -f "$PROBE_SRC" ] || fail "missing the AVFoundation probe: $PROBE_SRC"
+# -warnings-as-errors, like the package itself (the probe is compiled
+# outside SwiftPM, so it does not inherit Package.swift's setting).
+swiftc -O -warnings-as-errors -o "$PROBE" "$PROBE_SRC" || fail "could not build the AVFoundation probe"
+[ -x "$PROBE" ] || fail "the AVFoundation probe did not build: $PROBE"
 
 # --- helpers -----------------------------------------------------------------
 
@@ -220,6 +238,30 @@ assert_audiobook() {
     END { print n + 0 }')"
   [ "$titled" -eq "$got_markers" ] || fail "$((got_markers - titled)) of $got_markers chapters have no title"
   ok "markers: every chapter carries a title"
+
+  # chapter markers, as Apple's own players see them (ticket 12). ffprobe
+  # above read `chpl`; AVFoundation reads a chapter text track, and the
+  # difference is invisible until a real player shows no chapters at all.
+  apple_chapters="$("$PROBE" "$out" 2>"$WORK/apple-chapters.err" || true)"
+  if [ -z "$apple_chapters" ] && [ -s "$WORK/apple-chapters.err" ]; then
+    echo "FAIL: the AVFoundation probe could not read $out:" >&2
+    cat "$WORK/apple-chapters.err" >&2
+    exit 1
+  fi
+  got_apple="$(printf '%s\n' "$apple_chapters" | grep -c . || true)"
+  [ "$got_apple" -eq "$want_markers" ] \
+    || fail "AVFoundation reads $got_apple chapters, expected $want_markers (Chapters $chapters − Skipped $skipped)"
+  ok "markers: AVFoundation reads $got_apple chapter(s)"
+
+  apple_first="$(printf '%s\n' "$apple_chapters" | head -1 | cut -f1)"
+  awk -v s="$apple_first" 'BEGIN { exit (s >= 0 && s < 0.02) ? 0 : 1 }' \
+    || fail "AVFoundation's first chapter starts at ${apple_first}s, not 0:00"
+  ok "markers: AVFoundation's first chapter starts at 0:00"
+
+  apple_titled="$(printf '%s\n' "$apple_chapters" | awk -F'\t' 'NF > 1 && length($2) > 0 { n++ } END { print n + 0 }')"
+  [ "$apple_titled" -eq "$got_apple" ] \
+    || fail "$((got_apple - apple_titled)) of $got_apple AVFoundation chapters have no title"
+  ok "markers: every AVFoundation chapter carries a title"
 
   # metadata
   tags_out="$(ffprobe -v error -show_entries format_tags=title,artist -of default=noprint_wrappers=1 "$out" 2>/dev/null || true)"

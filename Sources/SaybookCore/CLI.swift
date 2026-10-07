@@ -144,6 +144,13 @@ public func saybookMain(_ arguments: [String]) -> Int32 {
         let offsets = ChapterMarkers.startOffsets(frameCounts: renders.map(\.frameCount))
         let markers = zip(offsets, renders).map { ChapterMarker(sampleOffset: $0, title: $1.title) }
         data = try ChapterMarkers.insertChpl(markers: markers, trackTimescale: Synthesis.trackTimescale, into: data)
+        // The chapter text track is what Apple's players read (#12) and it
+        // must run LAST: it appends the chapter track at the end of `moov`,
+        // which would leave `udta` no longer `moov`'s last child and break the
+        // `chpl`/`ilst` appends above.
+        data = try ChapterTextTrack.insert(
+            markers: markers, trackTimescale: Synthesis.trackTimescale, into: data
+        )
         // Publish the output atomically (ticket 06): with `--force` the
         // output file is replaced, so a killed final write must not leave a
         // half-written file at the output path.

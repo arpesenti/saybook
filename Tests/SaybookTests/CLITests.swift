@@ -122,7 +122,7 @@ final class CLITests: XCTestCase {
 
     // MARK: - Ticket 02: Chapter Markers, resume, summary
 
-    func testMultiChapterBookProducesM4BWithChapterMarkersAndSummary() throws {
+    func testMultiChapterBookProducesM4BWithChapterMarkersAndSummary() async throws {
         let dir = try makeTempDir()
         let input = dir.appendingPathComponent("book.epub")
         try FileManager.default.copyItem(
@@ -164,6 +164,22 @@ final class CLITests: XCTestCase {
         for (a, b) in Swift.zip(offsets, offsets.dropFirst()) where b <= a {
             XCTFail("offsets must be strictly increasing: \(offsets)")
         }
+
+        // The same markers, seen the way Apple's players see them (ticket 12).
+        // The `chpl` assertions above can pass on a file that shows Books and
+        // VoiceOver no chapters at all, so this is the assertion that actually
+        // proves the shipped binary produces a chaptered Audiobook — and it is
+        // the one ticket 02's tests lacked.
+        let chapters = try await avFoundationChapters(at: expected)
+        XCTAssertEqual(chapters.count, 3, "AVFoundation sees no chapters in the real binary's output")
+        XCTAssertEqual(chapters.map(\.title), ["Chapter One", "Chapter Two", "ch3"])
+        XCTAssertEqual(chapters.first?.start ?? -1, 0, accuracy: 0.02, "the first chapter starts at 0:00")
+        for (a, b) in Swift.zip(chapters, chapters.dropFirst()) where b.start <= a.start {
+            XCTFail("AVFoundation chapter starts must increase: \(chapters.map(\.start))")
+        }
+        // The last chapter runs to the end of the audio.
+        let decoded = try await AVURLAsset(url: expected).load(.duration).seconds
+        XCTAssertEqual(chapters.last?.end ?? 0, decoded, accuracy: 0.05)
 
         // Total duration ≈ 11 + 182 + 248 words plus the inter-Block pauses
         // at the default voice (measured ≈ 139 s on macOS 26; the repeated

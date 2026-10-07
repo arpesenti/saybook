@@ -105,6 +105,28 @@ enum Mp4 {
         return Data(out)
     }
 
+    /// The child box of `parent` with `type`, when it is one of `parent`'s
+    /// direct children.
+    static func childBox(in data: Data, of parent: Box, named type: String) -> Box? {
+        topLevelBoxes(in: data, parent.range).first { $0.type == type }
+    }
+
+    /// A box's header length: 8 for the usual `size`/`type`, 16 when `size`
+    /// is the 1 that means "a 64-bit size follows".
+    static func headerSize(of box: Box, in data: Data) -> Int {
+        let i = data.startIndex + box.range.lowerBound
+        let size32 = (UInt32(data[i]) << 24) | (UInt32(data[i + 1]) << 16)
+            | (UInt32(data[i + 2]) << 8) | UInt32(data[i + 3])
+        return size32 == 1 ? 16 : 8
+    }
+
+    /// Overwrites the 8 bytes at `offset` with `value` (big-endian), for the
+    /// 64-bit size field of a large box.
+    static func setU64(_ bytes: inout [UInt8], at offset: Int, _ value: UInt64) {
+        let be = u64(value)
+        for k in 0..<8 { bytes[offset + k] = be[k] }
+    }
+
     static func u32(_ v: UInt32) -> [UInt8] {
         withUnsafeBytes(of: v.bigEndian) { Array($0) }
     }

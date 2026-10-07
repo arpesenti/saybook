@@ -178,3 +178,47 @@ func rms(of data: Data, from sample: Int, count: Int) -> Float {
     }
     return (sum / Float(n)).squareRoot()
 }
+
+// MARK: - Reading an Audiobook the way Apple's players do
+
+/// One Chapter as AVFoundation reports it.
+struct ReadChapter: Equatable {
+    let title: String?
+    let start: TimeInterval
+    let end: TimeInterval
+}
+
+/// The Audiobook's chapters as AVFoundation vends them — the same entry point
+/// Books, VoiceOver and QuickTime use, which is why the chapter assertions go
+/// through here rather than only through `ffprobe` (ticket 12: `ffprobe` read
+/// every marker from a file that showed Apple's players no chapters at all).
+///
+/// The title is `nil` when no title-carrying item matched `locale`.
+func avFoundationChapters(
+    at url: URL, locale: Locale = Locale(identifier: "en-US")
+) async throws -> [ReadChapter] {
+    let asset = AVURLAsset(url: url)
+    let groups = try await asset.loadChapterMetadataGroups(
+        withTitleLocale: locale, containingItemsWithCommonKeys: [.commonKeyTitle]
+    )
+    var chapters: [ReadChapter] = []
+    for group in groups {
+        // `load(.stringValue)`, not the deprecated `stringValue` property: the
+        // package treats warnings as errors (ticket 15), and this one was
+        // invisible until that policy landed.
+        let title: String?
+        if let item = group.items.first(where: { $0.commonKey == .commonKeyTitle }) {
+            title = try? await item.load(.stringValue)
+        } else {
+            title = nil
+        }
+        chapters.append(
+            ReadChapter(
+                title: title,
+                start: group.timeRange.start.seconds,
+                end: group.timeRange.end.seconds
+            )
+        )
+    }
+    return chapters
+}
