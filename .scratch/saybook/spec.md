@@ -6,10 +6,10 @@
 
 ## Pipeline (all in-process)
 
-1. **Parse** — unzip (system `ditto` into **Scratch**), OPF metadata (title/author/language/cover), **Spine** order. Exclude `nav` / `doc-cover` / `doc-titlepage` documents. Chapters = readable Spine documents; titles: EPUB3 nav → largest heading → filename.
+1. **Parse** — unzip (system `ditto` into **Scratch**), OPF metadata (title/author/language/cover), **Spine** order. Exclude `nav` / `doc-cover` / `doc-titlepage` documents. Chapters = readable Spine documents; titles: EPUB3 nav → EPUB2 NCX `navMap` → largest heading → filename.
 2. **Extract** — XHTML → **Blocks** (paragraphs, lists, headings, figcaptions); skip footnotes, links (anchor text spoken once, never URLs), images, alt text; normalise whitespace.
 3. **Synthesise** — `AVSpeechSynthesizer.write()` per Block (0.3 s `postUtteranceDelay` between Blocks), **Voice** auto-picked per language (premium > enhanced > default), **Rate** 0.5 default. Main runloop pumped. ~55× realtime.
-4. **Assemble** — per-chapter PCM → Scratch CAF (per-chapter; existence = resume state), concatenated in Spine order.
+4. **Assemble** — per-chapter PCM → Scratch CAF (per-chapter; existence = resume state), concatenated in Spine order. Chapter Markers are written as both a QuickTime chapter text track (what Apple's players read) and a `chpl` box (what `ffprobe`-based players read): see ADR-0004.
 5. **Encode** — one CAF → `AVAssetExportSession` → M4A (AAC-LC ~34 kb/s, 22.05 kHz mono).
 6. **Finalise** — `ftyp` brand patch → `M4B ` + `m4b mp42 isom`; insert `chpl` (exact sample offsets from known frame counts vs track timescale); write `ilst` metadata (title/author/album) + `covr` cover (degrade gracefully if any box fails); delete Scratch.
 

@@ -16,6 +16,10 @@ _Avoid_: TOC, table of contents (that is navigation; the spine is the reading or
 A unit of spoken text corresponding to one readable document of the Book's Spine, carrying a title.
 _Avoid_: section, part, track
 
+**Chapter Title**:
+A Chapter's label, taken from the Book's own navigation when it declares one — the EPUB3 navigation document, or the EPUB2 NCX `navMap` — and otherwise from the document's own markup: its first non-empty largest heading, or failing that the filename. Declared navigation always outranks the markup heuristics, and the NCX contributes titles only: reading order comes from the Spine, never from the NCX's `playOrder`.
+_Avoid_: heading, label, nav title
+
 **Block**:
 The smallest unit of spoken text within a Chapter (a paragraph, list, or heading). Each Block is synthesised as one utterance.
 _Avoid_: sentence, paragraph (paragraph is one kind of Block)
@@ -25,8 +29,12 @@ The output artifact: a single M4B file containing the whole Book as one continuo
 _Avoid_: output, product, M4B
 
 **Chapter Marker**:
-A timestamped label inside the Audiobook marking where a Chapter begins.
+A timestamped label inside the Audiobook marking where a Chapter begins. An Audiobook carries the markers in two container representations — a QuickTime chapter text track (what Apple's players read) and a `chpl` box (what `ffprobe`-based players read) — because neither is read by everyone.
 _Avoid_: bookmark, cue point
+
+**Chapter Text Track**:
+The QuickTime chapter text track: a second track whose samples are the Chapter titles, referenced from the audio track. It is the representation AVFoundation reads, and therefore the one Books, VoiceOver and QuickTime show. Read by no other player, which is why the `chpl` box is written as well.
+_Avoid_: chapter track, text track (both are shorthand for this)
 
 **Voice**:
 The speech voice used for synthesis. Chosen automatically for the Book's language; overridable per run.

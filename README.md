@@ -26,6 +26,8 @@ swift build -c release
 # binary: .build/release/saybook
 ```
 
+Warnings are errors, always: `Package.swift` sets `-warnings-as-errors` on every Swift target and `-Wall -Wextra -Werror` on the C++ bridge, so anything the compiler reports fails the build rather than printing. That is not decoration — ticket 15 is what a green build hid here (an unreachable `catch` around a swallowed error, printing on every production build), and the policy's first act was to catch a deprecated API in this repo's own test helper. The cost is that `unsafeFlags` makes SwiftPM refuse to let another package depend on this one, which is not a thing saybook is for.
+
 ## Usage
 
 ```
@@ -78,9 +80,9 @@ Design and evidence: `docs/adr/0003-private-siri-speech-engine.md`.
 
 ## The Audiobook
 
-- **Container**: M4B (`ftyp` major brand `M4B `, compatible brands `m4b mp42 isom`), so players with audiobook support (VoiceOver, Audible-compatible apps, …) treat it as one Audiobook with chapters.
+- **Container**: M4B (`ftyp` major brand `M4B `, compatible brands `m4b mp42 isom`), so players with audiobook support treat it as one Audiobook with chapters.
 - **Audio**: AAC-LC, 22.05 kHz mono, at the export preset's ~34 kb/s — the whole Book is one continuous track.
-- **Chapter Markers**: one `chpl` marker per non-empty Chapter at its exact sample offset (computed from known frame counts, not decoded timing). Empty Chapters produce no audio and no marker.
+- **Chapter Markers**: one marker per non-empty Chapter at its exact sample offset (computed from known frame counts, not decoded timing), written **twice** because no single representation is read by everyone: a QuickTime **chapter text track** referenced from the audio track by `trak/tref/chap` — the form AVFoundation reads, and therefore Books, VoiceOver and QuickTime — and a **`chpl`** box in `moov/udta`, which `ffprobe`-based tooling and many third-party players read. `chpl` alone is not enough: a `chpl`-only Audiobook passes every `ffprobe` chapter check and shows no chapters in Apple's players (measured; [ADR-0004](docs/adr/0004-chapter-markers-apple-readable-text-track.md)). Empty Chapters produce no audio and no marker.
 - **Metadata**: title, artist (the author; `Unknown` when the Book declares none) and album (the title, per M4B convention) in `ilst`, plus the cover image in `covr` when the Book declares one.
 - **Spoken text**: paragraphs, lists, headings, quotes and captions in reading order, with a short natural pause between Blocks. Never spoken: navigation documents, cover and title pages, footnotes, links (anchor text once — never the URL), images and alt text.
 
@@ -90,7 +92,9 @@ Design and evidence: `docs/adr/0003-private-siri-speech-engine.md`.
 swift test
 ```
 
-The suite (167 tests, ~45 s, zero network access) covers the pipeline at its seams: EPUB parsing against in-repo mini-EPUB fixtures (single/multi-chapter, EPUB2 and EPUB3, nav, cover, empty documents, links/footnotes/images, missing author, DRM), per-Block extraction rules, the audible inter-Block pause (silence runs in the decoded Audiobook, pinned to the frame counts of the engine's own per-Block CAFs), Chapter Marker offset math and `chpl`/`ftyp`/`ilst` box round-trips, Voice selection, the speech **Engine** seam (voice-bundle parsing, an unusable engine reporting itself as a user error, and a real render through the private engine when the Mac has a Siri voice bundle — those tests skip when it does not), and end-to-end runs of the real binary (exit codes, resume, engine switching, SIGINT, flags). It is green in both the debug and the release configuration (`swift test -c release`) — the release run matters because it is the shipping configuration.
+The suite (190 tests, ~45 s, zero network access) covers the pipeline at its seams: EPUB parsing against in-repo mini-EPUB fixtures (single/multi-chapter, EPUB2 and EPUB3, nav, cover, empty documents, links/footnotes/images, missing author, DRM, NCX titles), per-Block extraction rules, the audible inter-Block pause (silence runs in the decoded Audiobook, pinned to the frame counts of the engine's own per-Block CAFs), Chapter Marker offset math and `chpl`/`ftyp`/`ilst` box round-trips, Voice selection, the speech **Engine** seam (voice-bundle parsing, an unusable engine reporting itself as a user error, and a real render through the private engine when the Mac has a Siri voice bundle — those tests skip when it does not), and end-to-end runs of the real binary (exit codes, resume, engine switching, SIGINT, flags).
+
+Chapter Markers are asserted through **both** readers, because they disagree: `ffprobe` (which reads `chpl`) and `AVURLAsset.loadChapterMetadataGroups` (the AVFoundation call Books and VoiceOver use, which reads the chapter text track). The AVFoundation half is the one ticket 02 lacked — a `chpl`-only build passes the `ffprobe` assertions and fails those, which is pinned by a test that builds without the text track and asserts Apple's reader sees nothing. The golden bytes of the chapter track's fixed-shape boxes are compared against a real Apple-produced M4B when one is pointed at with `SAYBOOK_CHAPTER_REFERENCE_M4B` (skipped otherwise, since the file is not ours to ship). It is green in both the debug and the release configuration (`swift test -c release`) — the release run matters because it is the shipping configuration.
 
 ### Manual E2E
 
@@ -126,4 +130,4 @@ The Siri leg **skips** — loudly, and still exiting 0 — on a Mac with no Siri
 - `Sources/saybook` — the executable entry point.
 - `Tests/SaybookTests` — unit + executable-level tests, with mini-EPUB fixtures under `Fixtures/`.
 - `Scripts/e2e.sh` — the manual E2E.
-- `GLOSSARY.md` — domain vocabulary; `docs/adr/` — architecture decisions (offline synthesis, hand-rolled M4B, the private Siri engine).
+- `GLOSSARY.md` — domain vocabulary; `docs/adr/` — architecture decisions (offline synthesis, hand-rolled M4B, the private Siri engine, the Apple-readable chapter text track).
