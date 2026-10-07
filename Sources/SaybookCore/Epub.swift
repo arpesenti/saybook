@@ -117,10 +117,15 @@ public enum Epub {
         let opfDir = opfURL.deletingLastPathComponent()
         try checkManifestForDRM(opf: opf, opfDir: opfDir, encrypted: encrypted)
 
-        // Chapter titles from the EPUB3 navigation document when present;
-        // otherwise the largest-heading → filename fallback applies.
+        // Chapter titles from the Book's own navigation: the EPUB3 navigation
+        // document when present, the EPUB2 NCX `navMap` otherwise. Both are
+        // author-declared labels and outrank the heading → filename heuristics.
         let navItem = opf.itemOrder.compactMap { opf.items[$0] }.first { $0.properties.contains("nav") }
-        let navTitles = navTitles(of: navItem, relativeTo: opfDir)
+        let ncxItem = opf.tocID.flatMap { opf.items[$0] }
+            ?? opf.itemOrder.compactMap { opf.items[$0] }
+                .first { $0.mediaType.lowercased() == "application/x-dtbncx+xml" }
+        let declaredTitles = navTitles(of: navItem, relativeTo: opfDir)
+            .merging(ncxTitles(of: ncxItem, relativeTo: opfDir)) { navTitle, _ in navTitle }
 
         // The cover image the OPF declares, if any.
         let cover = coverImage(declaredBy: opf, opfDir: opfDir)
@@ -140,7 +145,7 @@ public enum Epub {
             let filename = fileURL.deletingPathExtension().lastPathComponent
             chapters.append(
                 Chapter(
-                    title: navTitles[fileURL.standardized.path] ?? chapterTitle(from: text, filename: filename),
+                    title: declaredTitles[fileURL.standardized.path] ?? chapterTitle(from: text, filename: filename),
                     blocks: extractBlocks(from: text)
                 )
             )
@@ -180,6 +185,8 @@ public enum Epub {
         /// Manifest order (dictionary order is not).
         var itemOrder: [String] = []
         var spine: [SpineRef] = []
+        /// The EPUB2 `<spine toc="…"/>` NCX item id, when present.
+        var tocID: String?
         /// The EPUB2 `<meta name="cover" content="…"/>` item id, when present.
         var coverMetaID: String?
 
@@ -274,6 +281,11 @@ public enum Epub {
             opf.itemOrder.append(id)
         }
         // <itemref idref="ch1" linear="no"/>
+        // <spine toc="ncx"> names the EPUB2 NCX, which carries that book's
+        // Chapter titles (the navigation document is an EPUB3 mechanism).
+        if let toc = firstCapture(/<spine\b[^>]*\btoc\s*=\s*"([^"]+)"/, in: xml), !toc.isEmpty {
+            opf.tocID = toc
+        }
         for idref in xml.matches(of: /<itemref\b([^>]*?)\/>/) {
             let attrs = parseAttributes(idref.1)
             guard let id = attrs["idref"] else { continue }
@@ -328,6 +340,30 @@ public enum Epub {
     }
 
     // MARK: - Navigation & cover
+
+    /// Chapter titles from the EPUB2 NCX `navMap`: each `<navLabel><text>`
+    /// paired with the `<content src>` that follows it. `src` is resolved
+    /// against the NCX document and its fragment dropped, so the key is the
+    /// document path the Spine lookup uses — exactly as `navTitles` does. The
+    /// NCX contributes **titles only**: Spine order stays reading order (the
+    /// glossary's definition of a Chapter), never the NCX's `playOrder`.
+    private static func ncxTitles(of ncxItem: OPF.Item?, relativeTo opfDir: URL) -> [String: String] {
+        guard let ncxItem else { return [:] }
+        let ncxURL = opfDir.appendingPathComponent(ncxItem.href)
+        guard let xml = try? readUTF8(ncxURL) else { return [:] }
+        var titles: [String: String] = [:]
+        for match in xml.matches(
+            of: /<navLabel>\s*<text[^>]*>([\s\S]*?)<\/text>\s*<\/navLabel>\s*<content\b[^>]*\bsrc\s*=\s*"([^"]+)"/
+        ) {
+            guard let resolved = URL(string: String(match.2), relativeTo: ncxURL),
+                  !resolved.standardized.path.isEmpty
+            else { continue }
+            let title = normalize(decodeEntities(stripMarkup(String(match.1))))
+            guard !title.isEmpty else { continue }
+            titles[resolved.standardized.path, default: title] = title
+        }
+        return titles
+    }
 
     /// Chapter titles from the EPUB3 navigation document: each anchor's
     /// `href` (resolved against the nav document; the URL's `path` drops any

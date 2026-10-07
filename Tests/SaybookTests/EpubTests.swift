@@ -234,6 +234,114 @@ final class EpubTests: XCTestCase {
         XCTAssertEqual(book.chapters.map(\.title), ["Chapter Alpha", "Chapter Beta"])
     }
 
+    /// An EPUB2 Book whose Chapter titles live only in `toc.ncx`, with one
+    /// document carrying a real heading and one a whitespace-only heading.
+    /// Declared navigation outranks both heuristics — ticket 13's field report
+    /// had exactly this shape, and produced `ch01`-style filenames as markers.
+    func testLoadEpub2NcxTitlesOutrankTheHeadingFallback() throws {
+        let dir = try makeTempDir()
+        let root = dir.appendingPathComponent("tree")
+        try makeNcxEpub(in: root, spineToc: "ncx")
+
+        let archive = dir.appendingPathComponent("ncx.epub")
+        try zipTree(root, into: archive)
+        let book = try Epub.load(bookAt: archive, scratch: dir.appendingPathComponent("scratch"))
+
+        XCTAssertEqual(book.chapters.count, 2)
+        // "Begin Reading" beats ch1's real `<h1>Chapter One</h1>`;
+        // "The Second & Last" rescues ch2, whose only heading is `<h2> </h2>`
+        // (and whose filename the fallback would have used).
+        XCTAssertEqual(book.chapters.map(\.title), ["Begin Reading", "The Second & Last"])
+    }
+
+    /// The same Book with no `toc` attribute: the NCX is still found through
+    /// its manifest media type, because both are in the OPF already parsed.
+    func testLoadEpub2NcxFoundByMediaTypeWhenSpineNamesNoToc() throws {
+        let dir = try makeTempDir()
+        let root = dir.appendingPathComponent("tree")
+        try makeNcxEpub(in: root, spineToc: nil)
+
+        let archive = dir.appendingPathComponent("ncx.epub")
+        try zipTree(root, into: archive)
+        let book = try Epub.load(bookAt: archive, scratch: dir.appendingPathComponent("scratch"))
+
+        XCTAssertEqual(book.chapters.map(\.title), ["Begin Reading", "The Second & Last"])
+    }
+
+    /// An EPUB2 Book (no navigation document, no NCX) keeps the
+    /// largest-heading → filename fallback from ticket 02.
+    func testLoadEpub2WithoutNcxKeepsTheHeadingFallback() throws {
+        let dir = try makeTempDir()
+        let root = dir.appendingPathComponent("tree")
+        try makeNcxEpub(in: root, spineToc: nil, writeNcx: false)
+
+        let archive = dir.appendingPathComponent("ncx.epub")
+        try zipTree(root, into: archive)
+        let book = try Epub.load(bookAt: archive, scratch: dir.appendingPathComponent("scratch"))
+
+        // ch1's heading is used; ch2's whitespace-only heading falls to the filename.
+        XCTAssertEqual(book.chapters.map(\.title), ["Chapter One", "ch2"])
+    }
+
+    /// Builds a two-chapter EPUB2 Book under `root`. `spineToc` is the
+    /// `<spine toc="…">` value (`nil` omits the attribute); `writeNcx: false`
+    /// omits `toc.ncx` and its manifest entry, leaving an EPUB2 Book with no
+    /// navigation at all. ch1 has a real `<h1>`, ch2 a whitespace-only `<h2>`.
+    private func makeNcxEpub(in root: URL, spineToc: String?, writeNcx: Bool = true) throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try writeTreeFile("application/epub+zip", at: "mimetype", under: root)
+        try writeTreeFile(Self.containerXML, at: "META-INF/container.xml", under: root)
+        let tocAttribute = spineToc.map { " toc=\"\($0)\"" } ?? ""
+        let ncxItem = writeNcx
+            ? "<item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>"
+            : ""
+        try writeTreeFile("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:identifier id="bookid">urn:uuid:ncx-book</dc:identifier>
+            <dc:title>NCX Book</dc:title>
+            <dc:creator>Old Author</dc:creator>
+            <dc:language>en</dc:language>
+          </metadata>
+          <manifest>
+            \(ncxItem)
+            <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine\(tocAttribute)>
+            <itemref idref="ch1"/>
+            <itemref idref="ch2"/>
+          </spine>
+        </package>
+        """, at: "OEBPS/content.opf", under: root)
+        if writeNcx {
+            try writeTreeFile("""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+              <navMap>
+                <navPoint id="n1" playOrder="1">
+                  <navLabel><text>Begin Reading</text></navLabel>
+                  <content src="ch1.xhtml#ch01"/>
+                </navPoint>
+                <navPoint id="n2" playOrder="2">
+                  <navLabel><text>The Second &amp; Last</text></navLabel>
+                  <content src="ch2.xhtml"/>
+                </navPoint>
+              </navMap>
+            </ncx>
+            """, at: "OEBPS/toc.ncx", under: root)
+        }
+        try writeTreeFile(
+            "<html><body><h1>Chapter One</h1><p>First.</p></body></html>",
+            at: "OEBPS/ch1.xhtml", under: root
+        )
+        try writeTreeFile(
+            "<html><body><h2 class=\"chapterNumber\"> </h2><p>Second.</p></body></html>",
+            at: "OEBPS/ch2.xhtml", under: root
+        )
+    }
+
     // MARK: - Ticket 06: error paths, safety & signals
 
     /// The `META-INF/container.xml` pointing at `OEBPS/content.opf` (shared
